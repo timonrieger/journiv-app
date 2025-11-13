@@ -42,6 +42,7 @@ class Journal(BaseModel, table=True):
     is_favorite: bool = Field(default=False)
     is_archived: bool = Field(default=False)
     entry_count: int = Field(default=0, ge=0)  # Denormalized for performance
+    total_words: int = Field(default=0, ge=0)  # Denormalized for performance
     last_entry_at: Optional[datetime] = None
 
     # Relations

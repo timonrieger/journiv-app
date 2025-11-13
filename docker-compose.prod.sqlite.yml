@@ -25,6 +25,52 @@ services:
       retries: 5
       start_period: 10s
 
+  celery-worker:
+    image: swalabtech/journiv-app:latest
+    container_name: journiv-celery-worker
+    command: celery -A app.core.celery_app worker --loglevel=info
+    environment:
+      # Database
+      - DATABASE_URL=${DATABASE_URL:-sqlite:////data/journiv.db}
+
+      # Redis
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+
+      # Security
+      - SECRET_KEY=${SECRET_KEY}
+
+      # Storage
+      - MEDIA_ROOT=/data/media
+      - EXPORT_DIR=/data/exports
+      - IMPORT_TEMP_DIR=/data/imports/temp
+
+      # Import/Export settings
+      - IMPORT_EXPORT_MAX_FILE_SIZE_MB=${IMPORT_EXPORT_MAX_FILE_SIZE_MB:-500}
+      - EXPORT_CLEANUP_DAYS=${EXPORT_CLEANUP_DAYS:-7}
+
+      # App settings
+      - APP_VERSION=${APP_VERSION:-0.1.0-beta.7}
+      - ENVIRONMENT=production
+
+    volumes:
+      - app_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+    restart: unless-stopped
+    cpus: "1.0"
+    mem_limit: 1g
+    mem_reservation: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
   app:
     image: swalabtech/journiv-app:latest
     container_name: journiv-sqlite-app
@@ -42,7 +88,7 @@ services:
       - DOMAIN_NAME=${DOMAIN_NAME:-}
       - DOMAIN_SCHEME=${DOMAIN_SCHEME:-https}
       - APP_NAME=${APP_NAME:-Journiv}
-      - APP_VERSION=${APP_VERSION:-0.1.0-beta.6}
+      - APP_VERSION=${APP_VERSION:-0.1.0-beta.7}
       - DEBUG=false
       - ENVIRONMENT=production
       - API_V1_PREFIX=${API_V1_PREFIX:-/api/v1}
@@ -84,6 +130,14 @@ services:
       - ENABLE_HSTS=${ENABLE_HSTS:-true}
       - ENABLE_CSP_REPORTING=${ENABLE_CSP_REPORTING:-true}
       - CSP_REPORT_URI=${CSP_REPORT_URI:-/api/v1/security/csp-report}
+
+      # Import/Export
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - IMPORT_EXPORT_MAX_FILE_SIZE_MB=${IMPORT_EXPORT_MAX_FILE_SIZE_MB:-500}
+      - EXPORT_CLEANUP_DAYS=${EXPORT_CLEANUP_DAYS:-7}
+      - EXPORT_DIR=/data/exports
+      - IMPORT_TEMP_DIR=/data/imports/temp
 
     volumes:
       - app_data:/data

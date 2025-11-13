@@ -30,6 +30,7 @@ from app.core.logging_config import log_error, log_file_upload, log_warning
 from app.models.entry import Entry, EntryMedia
 from app.models.enums import MediaType, UploadStatus
 from app.models.journal import Journal
+from app.utils.import_export.media_handler import MediaHandler
 
 try:
     from PIL import Image
@@ -51,23 +52,11 @@ class MediaService:
     FFPROBE_DEFAULT_TIMEOUT = 300
     VIDEO_THUMBNAIL_SEEK_TIME = "00:00:01"
 
-    # Extension to MIME type mapping
-    MIME_TYPE_MAP = {
-        '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
-        '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
-        '.tiff': 'image/tiff', '.svg': 'image/svg+xml',
-        '.mp4': 'video/mp4', '.avi': 'video/x-msvideo', '.mov': 'video/quicktime',
-        '.webm': 'video/webm', '.mkv': 'video/x-matroska', '.flv': 'video/x-flv',
-        '.m4v': 'video/x-m4v', '.wmv': 'video/x-ms-wmv',
-        '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
-        '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.flac': 'audio/flac',
-        '.wma': 'audio/x-ms-wma'
-    }
-
-    # Media type categorization by extension
-    IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
-    VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".wmv", ".webm", ".mkv", ".flv", ".m4v"}
-    AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac", ".wma"}
+    # Use MediaHandler constants to avoid duplication
+    MIME_TYPE_MAP = MediaHandler.MIME_TYPE_MAP
+    IMAGE_EXTENSIONS = MediaHandler.IMAGE_EXTENSIONS
+    VIDEO_EXTENSIONS = MediaHandler.VIDEO_EXTENSIONS
+    AUDIO_EXTENSIONS = MediaHandler.AUDIO_EXTENSIONS
 
     def __init__(self, session: Optional[Session] = None):
         self.session = session
@@ -168,7 +157,7 @@ class MediaService:
 
     def _generate_filename(self, original_filename: str, user_id: str) -> str:
         """Generate a unique filename with sanitized original name."""
-        safe_original = Path(original_filename).name or "upload"
+        safe_original = MediaHandler.sanitize_filename(original_filename)
         file_extension = Path(safe_original).suffix.lower()
         unique_id = str(uuid.uuid4())
         return f"{user_id}_{unique_id}{file_extension}"
@@ -320,9 +309,8 @@ class MediaService:
         This centralizes file size, MIME type, and extension validation.
         """
         try:
-            # Check file size
-            max_size = self.settings.max_file_size_mb * 1024 * 1024
-            if len(file_content) > max_size:
+            # Check file size using shared utility
+            if not MediaHandler.validate_file_size(len(file_content), self.settings.max_file_size_mb):
                 return False, f"File size exceeds maximum limit of {self.settings.max_file_size_mb}MB"
 
             # Get allowed types (from settings or cached)
@@ -375,8 +363,7 @@ class MediaService:
     async def _check_file_size(self, file: UploadFile) -> None:
         """Check if file size is within limits."""
         if hasattr(file, 'size') and file.size:
-            max_size_bytes = self.settings.max_file_size_mb * 1024 * 1024
-            if file.size > max_size_bytes:
+            if not MediaHandler.validate_file_size(file.size, self.settings.max_file_size_mb):
                 raise FileTooLargeError(
                     f"File too large. Maximum size: {self.settings.max_file_size_mb}MB"
                 )

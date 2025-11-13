@@ -2,7 +2,13 @@
 API v1 router.
 """
 from fastapi import APIRouter
-from app.api.v1.endpoints import auth, users, journals, entries, moods, prompts, tags, analytics, media, health, security, oidc
+from app.api.v1.endpoints import (
+    auth, users, journals, entries, moods, prompts, tags,
+    analytics, media, health, security, oidc
+)
+# Import/Export routers
+from app.api.v1.endpoints.export_data import router as export_router
+from app.api.v1.endpoints.import_data import router as import_router
 
 api_router = APIRouter()
 
@@ -17,5 +23,7 @@ api_router.include_router(prompts.router, prefix="/prompts", tags=["prompts"])
 api_router.include_router(tags.router, prefix="/tags", tags=["tags"])
 api_router.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
 api_router.include_router(media.router, prefix="/media", tags=["media"])
+api_router.include_router(export_router, prefix="/export", tags=["import-export"])
+api_router.include_router(import_router, prefix="/import", tags=["import-export"])
 api_router.include_router(health.router, tags=["health"])
 api_router.include_router(security.router, prefix="/security", tags=["security"])

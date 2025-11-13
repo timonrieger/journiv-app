@@ -99,3 +99,25 @@ class JournalColor(str, Enum):
     NEUTRAL = "#737373"
     STONE = "#78716C"
 
+
+class JobStatus(str, Enum):
+    """Status for import/export jobs."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ImportSourceType(str, Enum):
+    """Source types for imports."""
+    JOURNIV = "journiv"
+    MARKDOWN = "markdown"
+    DAYONE = "dayone"
+
+
+class ExportType(str, Enum):
+    """Types of exports."""
+    FULL = "full"  # Full user export
+    JOURNAL = "journal"  # Single journal export
+

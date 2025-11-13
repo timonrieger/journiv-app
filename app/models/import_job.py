@@ -1,0 +1,121 @@
+"""
+Import job model for tracking async import operations.
+"""
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+import uuid
+
+from sqlalchemy import Column, ForeignKey, Enum as SAEnum
+from sqlmodel import Field, Column as SQLModelColumn, JSON
+
+from app.models.base import BaseModel
+from app.models.enums import JobStatus, ImportSourceType
+from app.core.time_utils import utc_now
+
+
+class ImportJob(BaseModel, table=True):
+    """
+    Track import job progress and results.
+
+    Import jobs are created when a user uploads a file for import
+    and processed asynchronously by Celery workers.
+    """
+    __tablename__ = "import_jobs"
+
+    # Foreign key to user who initiated the import
+    user_id: uuid.UUID = Field(
+        sa_column=Column(
+            ForeignKey("user.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True
+        )
+    )
+
+    # Job status and progress
+    status: JobStatus = Field(
+        default=JobStatus.PENDING,
+        sa_column=Column(
+            SAEnum(JobStatus, name="job_status_enum"),
+            nullable=False,
+            index=True
+        )
+    )
+    progress: int = Field(default=0, ge=0, le=100, description="Progress percentage 0-100")
+
+    # Source information
+    source_type: ImportSourceType = Field(
+        sa_column=Column(
+            SAEnum(ImportSourceType, name="import_source_type_enum"),
+            nullable=False
+        )
+    )
+    file_path: str = Field(nullable=False, description="Path to uploaded file")
+
+    # Progress tracking
+    total_items: int = Field(default=0, description="Total number of items to import")
+    processed_items: int = Field(default=0, description="Number of items processed so far")
+
+    # Results and errors
+    result_data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        sa_column=SQLModelColumn(JSON),
+        description="Final import statistics (journals, entries, media counts)"
+    )
+    errors: Optional[List[str]] = Field(
+        default=None,
+        sa_column=SQLModelColumn(JSON),
+        description="List of error messages"
+    )
+    warnings: Optional[List[str]] = Field(
+        default=None,
+        sa_column=SQLModelColumn(JSON),
+        description="List of warning messages"
+    )
+
+    # Completion timestamp
+    completed_at: Optional[datetime] = Field(default=None, description="When the job completed or failed")
+
+    def __repr__(self) -> str:
+        return f"<ImportJob(id={self.id}, user_id={self.user_id}, status={self.status}, progress={self.progress}%)>"
+
+    def mark_running(self):
+        """Mark job as running."""
+        self.status = JobStatus.RUNNING
+        self.progress = 0
+
+    def update_progress(self, processed: int, total: int):
+        """Update progress based on processed/total items."""
+        self.processed_items = processed
+        self.total_items = total
+        if total > 0:
+            self.progress = min(100, int((processed / total) * 100))
+
+    def set_progress(self, percent: int):
+        """Set progress percentage directly."""
+        self.progress = max(0, min(100, percent))
+
+    def mark_completed(self, result_data: Dict[str, Any]):
+        """Mark job as completed with results."""
+        self.status = JobStatus.COMPLETED
+        self.progress = 100
+        self.result_data = result_data
+        self.completed_at = utc_now()
+
+    def mark_failed(self, error_message: str):
+        """Mark job as failed with error."""
+        self.status = JobStatus.FAILED
+        if self.errors is None:
+            self.errors = []
+        self.errors.append(error_message)
+        self.completed_at = utc_now()
+
+    def mark_cancelled(self):
+        """Mark job as cancelled."""
+        self.status = JobStatus.CANCELLED
+        self.completed_at = utc_now()
+
+    def add_warning(self, warning: str):
+        """Add a warning message."""
+        if self.warnings is None:
+            self.warnings = []
+        self.warnings.append(warning)

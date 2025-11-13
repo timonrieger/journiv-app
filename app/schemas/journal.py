@@ -41,6 +41,7 @@ class JournalResponse(JournalBase, TimestampMixin):
     is_favorite: bool
     is_archived: bool
     entry_count: int
+    total_words: int
     last_entry_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime

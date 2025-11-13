@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "Journiv Service"
-    app_version: str = "0.1.0-beta.6"
+    app_version: str = "0.1.0-beta.7"
     debug: bool = False
     environment: str = "development"
     domain_name: str = ""
@@ -72,9 +72,23 @@ class Settings(BaseSettings):
     oidc_disable_ssl_verify: bool = False  # Only for local development with self-signed certs
     oidc_allow_insecure_prod: bool = False  # Allow OIDC over HTTP (INSECURE). Recommended only for advanced users in isolated homelabs. Default: false
 
-    # Redis Configuration (for OIDC state/cache) e.g., "redis://localhost:6379/0"
-    redis_url: Optional[str] = None
+    # Redis Configuration (for OIDC state/cache and Celery)
+    redis_url: Optional[str] = None  # e.g., "redis://localhost:6379/0"
 
+    # Celery Configuration
+    celery_broker_url: Optional[str] = None  # e.g., "redis://localhost:6379/0"
+    celery_result_backend: Optional[str] = None  # e.g., "redis://localhost:6379/0"
+    celery_task_serializer: str = "json"
+    celery_result_serializer: str = "json"
+    celery_accept_content: List[str] = ["json"]
+    celery_timezone: str = "UTC"
+    celery_enable_utc: bool = True
+
+    # Import/Export Configuration
+    import_export_max_file_size_mb: int = 500  # Max size for import/export files
+    export_cleanup_days: int = 7  # Days to keep export files before cleanup
+    import_temp_dir: str = "/data/imports/temp"
+    export_dir: str = "/data/exports"
 
     # CSP Configuration
     enable_csp: bool = True
@@ -443,6 +457,25 @@ class Settings(BaseSettings):
             raise ValueError("Timeout cannot exceed 3600 seconds (1 hour)")
         return v
 
+    @field_validator('celery_broker_url', 'celery_result_backend')
+    @classmethod
+    def validate_celery_urls(cls, v: Optional[str], info: ValidationInfo) -> Optional[str]:
+        """Auto-configure Celery from redis_url if not explicitly set."""
+        if v:
+            return v
+
+        field_name = info.field_name
+        redis_url = info.data.get('redis_url')
+
+        # If redis_url is set, use it as default for Celery
+        if redis_url and not v:
+            logger.info(
+                f"{field_name.upper()} not set. Defaulting to REDIS_URL: {redis_url}"
+            )
+            return redis_url
+
+        return v
+
     @model_validator(mode='after')
     def construct_oidc_redirect_uri(self) -> 'Settings':
         """Construct oidc_redirect_uri from domain components if not explicitly set."""
@@ -496,6 +529,16 @@ class Settings(BaseSettings):
             warnings.append(
                 "Using SQLite in production. Ensure you understand the durability "
                 "limitations and configure regular backups."
+            )
+
+        # Check Celery configuration for import/export
+        if not self.celery_broker_url:
+            warnings.append(
+                "CELERY_BROKER_URL not configured. Import/export features require Celery with Redis."
+            )
+        if not self.celery_result_backend:
+            warnings.append(
+                "CELERY_RESULT_BACKEND not configured. Job status tracking will not work."
             )
 
         # Security warnings

@@ -121,6 +121,9 @@ yarn-error.log*
 .flutter-plugins
 flutter_export_environment.sh
 
+# Flutter web build output
+web/
+
 # ===============================================================
 # MEDIA / USER FILES
 # ===============================================================
