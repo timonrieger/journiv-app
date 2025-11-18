@@ -32,8 +32,13 @@ concurrency:
 
 jobs:
   smoke-test:
-    name: Docker Compose Health Check
+    name: Health Check (${{ matrix.database }})
     runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        database: [sqlite, postgres]
+      fail-fast: false
 
     steps:
       - name: Checkout code
@@ -46,11 +51,10 @@ jobs:
 
       - name: Create test environment file
         run: |
-          echo "📝 Creating test environment configuration..."
+          echo "📝 Creating test environment configuration for ${{ matrix.database }}..."
           cat > .env.test <<EOF
           # Test configuration for CI
           SECRET_KEY=test-secret-key-for-ci-only-not-for-production
-          DATABASE_URL=sqlite:////data/journiv.db
           DOMAIN_NAME=localhost
           DOMAIN_SCHEME=http
           APP_PORT=8000
@@ -60,27 +64,43 @@ jobs:
           DISABLE_SIGNUP=false
           EOF
 
-          echo "✅ Environment file created"
+          # Add database-specific configuration
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            cat >> .env.test <<EOF
+          POSTGRES_USER=journiv
+          POSTGRES_PASSWORD=test-password-ci-only
+          POSTGRES_DB=journiv_test
+          POSTGRES_HOST=postgres
+          POSTGRES_PORT=5432
+          EOF
+          else
+            echo "DATABASE_URL=sqlite:////data/journiv.db" >> .env.test
+          fi
+
+          echo "✅ Environment file created for ${{ matrix.database }}"
 
       - name: Cleanup previous docker leftovers
         run: |
           echo "🧹 Cleaning up any previous Docker containers and volumes..."
-          APP_VERSION=latest docker compose -f docker-compose.prod.sqlite.yml down -v 2>/dev/null || true
+          COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
+          APP_VERSION=latest docker compose -f $COMPOSE_FILE down -v 2>/dev/null || true
           docker volume prune -f || true
           echo "✅ Cleanup complete"
 
       - name: Start Journiv with Docker Compose
         run: |
-          echo "🚀 Starting Journiv services with APP_VERSION=latest..."
-          APP_VERSION=latest docker compose -f docker-compose.prod.sqlite.yml --env-file .env.test up -d
+          echo "🚀 Starting Journiv services with APP_VERSION=latest (${{ matrix.database }})..."
+          COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
+          APP_VERSION=latest docker compose -f $COMPOSE_FILE --env-file .env.test up -d
 
           echo "📋 Checking running containers..."
-          APP_VERSION=latest docker compose -f docker-compose.prod.sqlite.yml ps
+          APP_VERSION=latest docker compose -f $COMPOSE_FILE ps
 
       - name: Wait for Journiv to be healthy
         run: |
           echo "⏳ Waiting for Journiv backend to become healthy..."
 
+          COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
           MAX_ATTEMPTS=30
           ATTEMPT=0
           SLEEP_TIME=2
@@ -98,7 +118,7 @@ jobs:
             # Show container status for debugging
             if [ $((ATTEMPT % 5)) -eq 0 ]; then
               echo "  📊 Container status:"
-              APP_VERSION=latest docker compose -f docker-compose.prod.sqlite.yml ps
+              APP_VERSION=latest docker compose -f $COMPOSE_FILE ps
             fi
 
             sleep $SLEEP_TIME
@@ -106,9 +126,9 @@ jobs:
 
           echo "❌ Journiv failed to become healthy after $MAX_ATTEMPTS attempts"
           echo "📋 Final container status:"
-          APP_VERSION=latest docker compose -f docker-compose.prod.sqlite.yml ps
+          APP_VERSION=latest docker compose -f $COMPOSE_FILE ps
           echo "📋 Application logs:"
-          APP_VERSION=latest docker compose -f docker-compose.prod.sqlite.yml logs app
+          APP_VERSION=latest docker compose -f $COMPOSE_FILE logs app
           exit 1
 
       - name: Test health endpoint
@@ -133,24 +153,32 @@ jobs:
         if: success()
         run: |
           echo "📋 Application logs (last 50 lines):"
-          APP_VERSION=latest docker compose -f docker-compose.prod.sqlite.yml logs --tail=50 app
+          COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
+          APP_VERSION=latest docker compose -f $COMPOSE_FILE logs --tail=50 app
 
       - name: Show application logs (on failure)
         if: failure()
         run: |
           echo "📋 Full application logs:"
-          APP_VERSION=latest docker compose -f docker-compose.prod.sqlite.yml logs app
+          COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
+          APP_VERSION=latest docker compose -f $COMPOSE_FILE logs app
           echo ""
           echo "📋 Redis logs:"
-          APP_VERSION=latest docker compose -f docker-compose.prod.sqlite.yml logs redis
+          APP_VERSION=latest docker compose -f $COMPOSE_FILE logs redis
           echo ""
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            echo "📋 Postgres logs:"
+            APP_VERSION=latest docker compose -f $COMPOSE_FILE logs postgres
+            echo ""
+          fi
           echo "📋 Celery worker logs:"
-          APP_VERSION=latest docker compose -f docker-compose.prod.sqlite.yml logs celery-worker
+          APP_VERSION=latest docker compose -f $COMPOSE_FILE logs celery-worker
 
       - name: Cleanup
         if: always()
         run: |
           echo "🧹 Cleaning up..."
-          APP_VERSION=latest docker compose -f docker-compose.prod.sqlite.yml down -v || true
+          COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
+          APP_VERSION=latest docker compose -f $COMPOSE_FILE down -v || true
           docker volume prune -f || true
           echo "✅ Cleanup complete"
