@@ -33,6 +33,7 @@ concurrency:
 jobs:
   smoke-test:
     name: Health Check (${{ matrix.database }})
+
     runs-on: ubuntu-latest
 
     strategy:
@@ -82,6 +83,7 @@ jobs:
       - name: Cleanup previous docker leftovers
         run: |
           echo "🧹 Cleaning up any previous Docker containers and volumes..."
+          export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
           COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
           APP_VERSION=latest docker compose -f $COMPOSE_FILE down -v 2>/dev/null || true
           docker volume prune -f || true
@@ -90,6 +92,7 @@ jobs:
       - name: Start Journiv with Docker Compose
         run: |
           echo "🚀 Starting Journiv services with APP_VERSION=latest (${{ matrix.database }})..."
+          export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
           COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
           APP_VERSION=latest docker compose -f $COMPOSE_FILE --env-file .env.test up -d
 
@@ -99,7 +102,7 @@ jobs:
       - name: Wait for Journiv to be healthy
         run: |
           echo "⏳ Waiting for Journiv backend to become healthy..."
-
+          export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
           COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
           MAX_ATTEMPTS=30
           ATTEMPT=0
@@ -153,6 +156,7 @@ jobs:
         if: success()
         run: |
           echo "📋 Application logs (last 50 lines):"
+          export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
           COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
           APP_VERSION=latest docker compose -f $COMPOSE_FILE logs --tail=50 app
 
@@ -160,6 +164,7 @@ jobs:
         if: failure()
         run: |
           echo "📋 Full application logs:"
+          export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
           COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
           APP_VERSION=latest docker compose -f $COMPOSE_FILE logs app
           echo ""
@@ -178,6 +183,7 @@ jobs:
         if: always()
         run: |
           echo "🧹 Cleaning up..."
+          export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
           COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
           APP_VERSION=latest docker compose -f $COMPOSE_FILE down -v || true
           docker volume prune -f || true
