@@ -1,0 +1,3 @@
+reviews:
+  path_filters:
+    - "!web/**" # Ignore Flutter web build output

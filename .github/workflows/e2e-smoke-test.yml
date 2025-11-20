@@ -84,8 +84,10 @@ jobs:
         run: |
           echo "🧹 Cleaning up any previous Docker containers and volumes..."
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
-          COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
-          APP_VERSION=latest docker compose -f $COMPOSE_FILE down -v 2>/dev/null || true
+          APP_VERSION=latest docker compose \
+            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f docker-compose.override.ci.yml \
+            down -v 2>/dev/null || true
 
           docker volume rm journiv-${{ matrix.database }}_app_data >/dev/null 2>&1 || true
           docker volume rm journiv-${{ matrix.database }}_redis_data >/dev/null 2>&1 || true
@@ -98,17 +100,22 @@ jobs:
         run: |
           echo "🚀 Starting Journiv services with APP_VERSION=latest (${{ matrix.database }})..."
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
-          COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
-          APP_VERSION=latest docker compose -f $COMPOSE_FILE --env-file .env.test up -d
+          APP_VERSION=latest docker compose \
+            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f docker-compose.override.ci.yml \
+            --env-file .env.test up -d
 
           echo "📋 Checking running containers..."
-          APP_VERSION=latest docker compose -f $COMPOSE_FILE ps
+          export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          APP_VERSION=latest docker compose \
+            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f docker-compose.override.ci.yml \
+            ps
 
       - name: Wait for Journiv to be healthy
         run: |
           echo "⏳ Waiting for Journiv backend to become healthy..."
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
-          COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
           MAX_ATTEMPTS=30
           ATTEMPT=0
           SLEEP_TIME=2
@@ -126,7 +133,11 @@ jobs:
             # Show container status for debugging
             if [ $((ATTEMPT % 5)) -eq 0 ]; then
               echo "  📊 Container status:"
-              APP_VERSION=latest docker compose -f $COMPOSE_FILE ps
+              export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+              APP_VERSION=latest docker compose \
+                -f docker-compose.prod.${{ matrix.database }}.yml \
+                -f docker-compose.override.ci.yml \
+                ps
             fi
 
             sleep $SLEEP_TIME
@@ -134,9 +145,17 @@ jobs:
 
           echo "❌ Journiv failed to become healthy after $MAX_ATTEMPTS attempts"
           echo "📋 Final container status:"
-          APP_VERSION=latest docker compose -f $COMPOSE_FILE ps
+          export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          APP_VERSION=latest docker compose \
+            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f docker-compose.override.ci.yml \
+            ps
           echo "📋 Application logs:"
-          APP_VERSION=latest docker compose -f $COMPOSE_FILE logs app
+          export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          APP_VERSION=latest docker compose \
+            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f docker-compose.override.ci.yml \
+            logs app
           exit 1
 
       - name: Test health endpoint
@@ -162,35 +181,53 @@ jobs:
         run: |
           echo "📋 Application logs (last 50 lines):"
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
-          COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
-          APP_VERSION=latest docker compose -f $COMPOSE_FILE logs --tail=50 app
+          APP_VERSION=latest docker compose \
+            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f docker-compose.override.ci.yml \
+            logs --tail=50 app
 
       - name: Show application logs (on failure)
         if: failure()
         run: |
           echo "📋 Full application logs:"
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
-          COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
-          APP_VERSION=latest docker compose -f $COMPOSE_FILE logs app
+          APP_VERSION=latest docker compose \
+            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f docker-compose.override.ci.yml \
+            logs app
           echo ""
           echo "📋 Redis logs:"
-          APP_VERSION=latest docker compose -f $COMPOSE_FILE logs redis
+          export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          APP_VERSION=latest docker compose \
+            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f docker-compose.override.ci.yml \
+            logs redis
           echo ""
           if [ "${{ matrix.database }}" = "postgres" ]; then
             echo "📋 Postgres logs:"
-            APP_VERSION=latest docker compose -f $COMPOSE_FILE logs postgres
+            export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+            APP_VERSION=latest docker compose \
+              -f docker-compose.prod.${{ matrix.database }}.yml \
+              -f docker-compose.override.ci.yml \
+              logs postgres
             echo ""
           fi
           echo "📋 Celery worker logs:"
-          APP_VERSION=latest docker compose -f $COMPOSE_FILE logs celery-worker
+          export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          APP_VERSION=latest docker compose \
+            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f docker-compose.override.ci.yml \
+            logs celery-worker
 
       - name: Cleanup
         if: always()
         run: |
           echo "🧹 Cleaning up..."
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
-          COMPOSE_FILE="docker-compose.prod.${{ matrix.database }}.yml"
-          APP_VERSION=latest docker compose -f $COMPOSE_FILE down -v || true
+          APP_VERSION=latest docker compose \
+            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f docker-compose.override.ci.yml \
+            down -v || true
 
           docker volume rm journiv-${{ matrix.database }}_app_data >/dev/null 2>&1 || true
           docker volume rm journiv-${{ matrix.database }}_redis_data >/dev/null 2>&1 || true

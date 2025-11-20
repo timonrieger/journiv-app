@@ -18,6 +18,8 @@ services:
   celery-worker:
     volumes:
       - journiv_ci_data:/data
+    depends_on:
+      - app # Wait for the app to be ready to avoid race conditions in dir creation
 
 volumes:
   journiv_ci_data:
