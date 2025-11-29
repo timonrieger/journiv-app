@@ -105,7 +105,6 @@ async def oidc_login(request: Request):
         code_challenge=challenge,
         code_challenge_method="S256",
         nonce=nonce,
-        prompt="login"
     )
 
 
