@@ -970,13 +970,23 @@ class MediaService:
         """
         from app.services import entry_service as entry_service_module
 
-        # Get media record first to get file path
+        # Get media record first to get file path and thumbnail path
         media = self.get_media_by_id(media_id, user_id, session)
         file_path = media.file_path
+        thumbnail_path = media.thumbnail_path
 
         # Delete database record using entry service
         entry_service = entry_service_module.EntryService(session)
         entry_service.delete_entry_media(media_id, user_id)
+
+        # Delete thumbnail file if it exists
+        if thumbnail_path:
+            try:
+                full_thumbnail_path = (self.media_root / thumbnail_path).resolve()
+                if full_thumbnail_path.exists() and str(full_thumbnail_path).startswith(str(self.media_root.resolve())):
+                    full_thumbnail_path.unlink(missing_ok=True)
+            except Exception as e:
+                log_error(f"Failed to delete thumbnail file: {e}")
 
         # Delete file from filesystem
         try:
