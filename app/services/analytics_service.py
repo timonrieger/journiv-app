@@ -46,12 +46,24 @@ class AnalyticsService:
         return streak
 
     def update_writing_streak(self, user_id: uuid.UUID, entry_date: date) -> WritingStreak:
-        """Update writing streak when a new entry is created."""
+        """Update writing streak when a new entry is created.
+
+        Note: If the entry is backdated (earlier than last_entry_date),
+        we recalculate the entire streak to ensure accuracy.
+        """
         streak = self.get_writing_streak(user_id)
         if not streak:
             streak = self.create_writing_streak(user_id)
 
-        # Calculate if this is a consecutive day
+        # If backdated entry, recalculate everything from scratch
+        if streak.last_entry_date and entry_date < streak.last_entry_date:
+            log_info(f"Backdated entry detected for user {user_id}: {entry_date} < {streak.last_entry_date}. Recalculating streak.")
+            # Flush the session to ensure the entry is visible in queries
+            self.session.flush()
+            result = self.recalculate_writing_streak_stats(user_id)
+            return result if result is not None else streak
+
+        # Calculate if this is a consecutive day (only for forward-dated or same-day entries)
         if streak.last_entry_date:
             days_diff = (entry_date - streak.last_entry_date).days
             if days_diff == 1:
@@ -75,7 +87,7 @@ class AnalyticsService:
             if streak.current_streak > streak.longest_streak:
                 streak.longest_streak = streak.current_streak
 
-        # Update last entry date
+        # Update last entry date (only if current or future date)
         streak.last_entry_date = entry_date
 
         # Update total entries and words
@@ -162,6 +174,8 @@ class AnalyticsService:
         Returns:
             Dict with current_streak, longest_streak, last_entry_date, streak_start_date
         """
+        # Expire all to ensure we get fresh data from the database
+        self.session.expire_all()
         entries = self.session.exec(
             select(Entry).where(Entry.user_id == user_id).order_by(Entry.entry_date.desc())
         ).all()
