@@ -25,6 +25,9 @@ REDIS_OIDC_REQUIRED_MSG = (
     "REDIS_URL must be provided when OIDC_ENABLED=true."
 )
 
+JOURNIV_PLUS_DOC_URL = "https://journiv.com/plus"
+DEFAULT_PLUS_SERVER_URL = "https://plus.journiv.com"
+
 # Define the project root directory
 PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
 
@@ -135,6 +138,9 @@ class Settings(BaseSettings):
     rate_limit_default_limits: Optional[List[str]] = None
     rate_limit_config: Optional[Dict[str, Dict[str, str]]] = None
 
+    # Journiv Plus Server integration
+    plus_server_url: str = DEFAULT_PLUS_SERVER_URL
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=False,
@@ -148,7 +154,7 @@ class Settings(BaseSettings):
         if url.startswith("sqlite"):
             return "sqlite"
         elif url.startswith(("postgresql", "postgres")):
-            return "postgresql"
+            return "postgres"
         return "sqlite"
 
     @property
@@ -775,6 +781,23 @@ class Settings(BaseSettings):
 
 # Create settings instance
 settings = Settings()
+
+
+# Version check constants can be modified later by admin.
+VERSION_CHECK_ENABLED = True
+# TODO: Change to 24 hours
+VERSION_CHECK_INTERVAL_HOURS = 1
+# Cache TTL: 4x the check interval (longer than check interval to ensure availability)
+# This ensures cached data is available even if checks are delayed
+VERSION_CHECK_CACHE_TTL = int(VERSION_CHECK_INTERVAL_HOURS * 4 * 3600)  # 4x interval in seconds
+
+# License refresh constants
+# TODO: Change to 8 hours
+LICENSE_REFRESH_INTERVAL_HOURS = 1
+
+# License cache constants
+# Cache TTL: 8 hours (28800 seconds)
+LICENSE_CACHE_TTL = 28800
 
 
 def get_settings() -> Settings:

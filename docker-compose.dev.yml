@@ -1,0 +1,153 @@
+# Journiv Development Docker Compose (PostgreSQL)
+# Recommended for testing PostgreSQL-specific features or multi-user scenarios.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d
+# Note: dev compose files use the main tag (docker image from main
+# branch) for development purposes. Do not run this for production;
+# use prod compose files instead which use the latest tag.
+
+x-base-env: &base-env
+  REDIS_URL: redis://valkey:6379/0
+  CELERY_BROKER_URL: redis://valkey:6379/0
+  CELERY_RESULT_BACKEND: redis://valkey:6379/0
+  DB_DRIVER: postgres
+  POSTGRES_HOST: postgres
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+x-dev-common: &dev-common
+  build: .
+  env_file:
+    - .env
+  volumes:
+    - .:/app
+    - ./data:/data
+  depends_on:
+    postgres:
+      condition: service_healthy
+    valkey:
+      condition: service_healthy
+
+x-celery-healthcheck: &celery-healthcheck
+  interval: 30s
+  timeout: 10s
+  retries: 5
+  start_period: 40s
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: journiv-dev-postgres
+    # Expose the port to the host in dev mode for local development
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-journiv} -d ${POSTGRES_DB:-journiv_dev}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-journiv}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-journiv_dev}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  valkey:
+    # Journiv uses Valkey which is similar to Redis for cache.
+    image: valkey/valkey:8.0-alpine
+    container_name: journiv-dev-valkey
+    restart: unless-stopped
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  celery-worker:
+    <<: *dev-common
+    container_name: journiv-dev-celery-worker
+    command: celery -A app.core.celery_app worker --loglevel=info
+    environment:
+      <<: *base-env
+      SERVICE_ROLE: celery-worker
+      ENVIRONMENT: development
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A app.core.celery_app inspect ping --timeout=5 | grep -q pong",
+        ]
+      <<: *celery-healthcheck
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+        reservations:
+          memory: 256m
+
+  celery-beat:
+    <<: *dev-common
+    container_name: journiv-dev-celery-beat
+    command: celery -A app.core.celery_app beat --loglevel=info --scheduler redbeat.RedBeatScheduler
+    environment:
+      <<: *base-env
+      SERVICE_ROLE: celery-beat
+      ENVIRONMENT: development
+      REDBEAT_REDIS_URL: redis://valkey:6379/2
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+        reservations:
+          memory: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'celery.*beat' > /dev/null || exit 1"]
+      <<: *celery-healthcheck
+
+  app:
+    <<: *dev-common
+    container_name: journiv-dev-postgres-app
+    entrypoint: ["/app/scripts/docker-entrypoint-dev.sh"]
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    environment:
+      <<: *base-env
+      SERVICE_ROLE: app
+      ENVIRONMENT: development
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+        reservations:
+          memory: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  postgres_data:
+  valkey_data:
+
+networks:
+  default:
+    driver: bridge

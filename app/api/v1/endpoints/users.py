@@ -14,7 +14,7 @@ from app.models.user import User
 from app.schemas.user import UserResponse, UserUpdate, UserSettingsResponse, UserSettingsUpdate
 from app.services.user_service import UserService
 
-router = APIRouter()
+router = APIRouter(prefix="/users", tags=["users"])
 
 
 class DeleteResponse(BaseModel):

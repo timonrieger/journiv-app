@@ -1,11 +1,14 @@
 """
 Request logging middleware with request ID tracking, context propagation, and structured logging.
 """
+import json
 import logging
 import time
 import uuid
 from contextvars import ContextVar
 from typing import Optional
+
+from app.core.logging_config import _sanitize_data
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +17,32 @@ request_id_ctx: ContextVar[str] = ContextVar('request_id', default='unknown')
 
 # Default status code when response is not captured
 DEFAULT_STATUS_CODE = 500
+
+
+def _sanitize_response_body(response_body: str) -> str:
+    """
+    Sanitize response body to mask sensitive fields.
+
+    Handles both JSON and plain text response bodies.
+    For JSON responses, parses, sanitizes, and re-stringifies.
+    For plain text, applies string sanitization.
+
+    Args:
+        response_body: The response body string to sanitize
+
+    Returns:
+        Sanitized response body string
+    """
+    if not response_body:
+        return response_body
+
+    try:
+        parsed = json.loads(response_body)
+        sanitized = _sanitize_data(parsed)
+        return json.dumps(sanitized)
+    except (json.JSONDecodeError, TypeError):
+        sanitized = _sanitize_data(response_body)
+        return str(sanitized) if sanitized is not None else ""
 
 
 class RequestLoggingMiddleware:
@@ -64,9 +93,10 @@ class RequestLoggingMiddleware:
             response_captured = None
             error_occurred = False
             error_message = None
+            response_body = None
 
             async def send_wrapper(message):
-                nonlocal response_captured
+                nonlocal response_captured, response_body
                 if message["type"] == "http.response.start":
                     # Capture status code
                     status_code = message.get("status", DEFAULT_STATUS_CODE)
@@ -76,6 +106,14 @@ class RequestLoggingMiddleware:
                     headers = list(message.get("headers", []))
                     headers.append([b"x-request-id", request_id.encode()])
                     message["headers"] = headers
+                elif message["type"] == "http.response.body":
+                    # Capture response body for 4xx errors to help with debugging
+                    body = message.get("body", b"")
+                    if body and response_captured and 400 <= response_captured.get("status_code", 0) < 500:
+                        try:
+                            response_body = body.decode("utf-8")[:1000]  # Limit to 1KB
+                        except (UnicodeDecodeError, AttributeError):
+                            pass
 
                 await send(message)
 
@@ -133,6 +171,10 @@ class RequestLoggingMiddleware:
                     if status_code >= 500:
                         logger.error("Request completed with server error", extra=log_extra)
                     elif status_code >= 400:
+                        # Include response body for 4xx errors to help with debugging
+                        if response_body:
+                            sanitized_body = _sanitize_response_body(response_body)
+                            log_extra["response_body"] = sanitized_body
                         logger.warning("Request completed with client error", extra=log_extra)
                     else:
                         logger.info("Request completed successfully", extra=log_extra)

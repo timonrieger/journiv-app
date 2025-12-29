@@ -367,12 +367,13 @@ class AnalyticsService:
         if last_month_entries and last_month_entries > 0:
             entry_growth = ((current_month_entries - last_month_entries) / last_month_entries) * 100
 
+        today_day = now.date().day
         return {
             'current_month_entries': current_month_entries,
             'current_month_words': current_month_words,
             'entry_growth_percentage': round(entry_growth, 2),
-            'average_daily_entries': round(current_month_entries / now.day, 2) if now.day > 0 else 0,
-            'average_words_per_day': round(current_month_words / now.day, 2) if now.day > 0 else 0
+            'average_daily_entries': round(current_month_entries / today_day, 2),
+            'average_words_per_day': round(current_month_words / today_day, 2)
         }
 
     def get_journal_analytics(self, user_id: uuid.UUID) -> Dict[str, Any]:

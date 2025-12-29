@@ -7,12 +7,17 @@ from pydantic import ValidationError
 from app.core.config import Settings, DEFAULT_SQLITE_URL
 
 
+def make_settings(**kwargs):
+    """Create Settings without loading values from .env or environment."""
+    return Settings(_env_file=None, **kwargs)
+
+
 class TestDBDriverValidation:
     """Test DB_DRIVER field validation and requirements."""
 
     def test_db_driver_defaults_to_sqlite(self):
         """Test that DB_DRIVER defaults to 'sqlite' when not specified."""
-        settings = Settings(
+        settings = make_settings(
             secret_key="test-secret-key-for-testing-only-32-chars",
             database_url=DEFAULT_SQLITE_URL,
         )
@@ -20,7 +25,7 @@ class TestDBDriverValidation:
 
     def test_db_driver_accepts_sqlite(self):
         """Test that DB_DRIVER accepts 'sqlite' value."""
-        settings = Settings(
+        settings = make_settings(
             secret_key="test-secret-key-for-testing-only-32-chars",
             db_driver="sqlite",
             database_url=DEFAULT_SQLITE_URL,
@@ -29,7 +34,7 @@ class TestDBDriverValidation:
 
     def test_db_driver_accepts_postgres(self):
         """Test that DB_DRIVER accepts 'postgres' value."""
-        settings = Settings(
+        settings = make_settings(
             secret_key="test-secret-key-for-testing-only-32-chars",
             db_driver="postgres",
             postgres_password="test-password",
@@ -38,7 +43,7 @@ class TestDBDriverValidation:
 
     def test_db_driver_case_insensitive(self):
         """Test that DB_DRIVER is case-insensitive."""
-        settings = Settings(
+        settings = make_settings(
             secret_key="test-secret-key-for-testing-only-32-chars",
             db_driver="POSTGRES",
             postgres_password="test-password",
@@ -48,7 +53,7 @@ class TestDBDriverValidation:
     def test_db_driver_rejects_invalid_value(self):
         """Test that DB_DRIVER rejects invalid values."""
         with pytest.raises(ValidationError) as exc_info:
-            Settings(
+            make_settings(
                 secret_key="test-secret-key-for-testing-only-32-chars",
                 db_driver="mysql",
             )
@@ -59,7 +64,7 @@ class TestDBDriverValidation:
         # Should fail without password or postgres URL
         # Explicitly set postgres_password to None to override any environment variables
         with pytest.raises(ValidationError) as exc_info:
-            Settings(
+            make_settings(
                 secret_key="test-secret-key-for-testing-only-32-chars",
                 db_driver="postgres",
                 database_url=DEFAULT_SQLITE_URL,  # SQLite URL, not postgres
@@ -69,7 +74,7 @@ class TestDBDriverValidation:
 
     def test_postgres_with_password_succeeds(self):
         """Test that DB_DRIVER=postgres succeeds when POSTGRES_PASSWORD is provided."""
-        settings = Settings(
+        settings = make_settings(
             secret_key="test-secret-key-for-testing-only-32-chars",
             db_driver="postgres",
             postgres_password="test-password",
@@ -79,7 +84,7 @@ class TestDBDriverValidation:
 
     def test_postgres_with_database_url_postgresql_succeeds(self):
         """Test that DB_DRIVER=postgres succeeds when DATABASE_URL is a postgresql:// URL."""
-        settings = Settings(
+        settings = make_settings(
             secret_key="test-secret-key-for-testing-only-32-chars",
             db_driver="postgres",
             database_url="postgresql://user:password@localhost:5432/journiv",
@@ -91,7 +96,7 @@ class TestDBDriverValidation:
 
     def test_postgres_with_database_url_postgres_scheme_succeeds(self):
         """Test that DB_DRIVER=postgres succeeds with 'postgres://' URL scheme."""
-        settings = Settings(
+        settings = make_settings(
             secret_key="test-secret-key-for-testing-only-32-chars",
             db_driver="postgres",
             database_url="postgres://user:password@localhost:5432/journiv",
@@ -103,7 +108,7 @@ class TestDBDriverValidation:
 
     def test_postgres_with_database_url_succeeds(self):
         """Test that DB_DRIVER=postgres succeeds when DATABASE_URL is a postgres URL."""
-        settings = Settings(
+        settings = make_settings(
             secret_key="test-secret-key-for-testing-only-32-chars",
             db_driver="postgres",
             database_url="postgresql://user:password@localhost:5432/journiv",
@@ -116,7 +121,7 @@ class TestDBDriverValidation:
     def test_postgres_rejects_empty_password(self):
         """Test that DB_DRIVER=postgres rejects empty POSTGRES_PASSWORD."""
         with pytest.raises(ValidationError) as exc_info:
-            Settings(
+            make_settings(
                 secret_key="test-secret-key-for-testing-only-32-chars",
                 db_driver="postgres",
                 postgres_password="",  # Empty password
@@ -126,7 +131,7 @@ class TestDBDriverValidation:
     def test_postgres_rejects_whitespace_only_password(self):
         """Test that DB_DRIVER=postgres rejects whitespace-only POSTGRES_PASSWORD."""
         with pytest.raises(ValidationError) as exc_info:
-            Settings(
+            make_settings(
                 secret_key="test-secret-key-for-testing-only-32-chars",
                 db_driver="postgres",
                 postgres_password="   ",  # Whitespace only
@@ -135,7 +140,7 @@ class TestDBDriverValidation:
 
     def test_sqlite_works_without_postgres_config(self):
         """Test that DB_DRIVER=sqlite works without any postgres configuration."""
-        settings = Settings(
+        settings = make_settings(
             secret_key="test-secret-key-for-testing-only-32-chars",
             db_driver="sqlite",
             database_url=DEFAULT_SQLITE_URL,
@@ -145,7 +150,7 @@ class TestDBDriverValidation:
 
     def test_postgres_with_password_uses_defaults(self):
         """Test that DB_DRIVER=postgres with password uses defaults for host, user, db."""
-        settings = Settings(
+        settings = make_settings(
             secret_key="test-secret-key-for-testing-only-32-chars",
             db_driver="postgres",
             postgres_password="test-password",
@@ -162,7 +167,7 @@ class TestDBDriverValidation:
 
     def test_postgres_with_password_production_defaults(self):
         """Test that DB_DRIVER=postgres with password uses production defaults."""
-        settings = Settings(
+        settings = make_settings(
             secret_key="test-secret-key-for-testing-only-32-chars",
             db_driver="postgres",
             postgres_password="test-password",
@@ -175,7 +180,7 @@ class TestDBDriverValidation:
     def test_postgres_validates_effective_url_is_postgres(self):
         """Test that DB_DRIVER=postgres validates effective URL is actually PostgreSQL."""
         # This should pass - postgres_password will make effective URL postgres
-        settings = Settings(
+        settings = make_settings(
             secret_key="test-secret-key-for-testing-only-32-chars",
             db_driver="postgres",
             postgres_password="test-password",
@@ -202,7 +207,7 @@ class TestDBDriverValidation:
     def test_postgres_rejects_both_password_and_database_url(self):
         """Test that DB_DRIVER=postgres fails when both POSTGRES_PASSWORD and DATABASE_URL (postgres) are set."""
         with pytest.raises(ValidationError) as exc_info:
-            Settings(
+            make_settings(
                 secret_key="test-secret-key-for-testing-only-32-chars",
                 db_driver="postgres",
                 postgres_password="test-password",
@@ -215,11 +220,10 @@ class TestDBDriverValidation:
         """Test that DB_DRIVER=postgres requires either POSTGRES_PASSWORD or DATABASE_URL (postgres)."""
         # This test already exists as test_postgres_requires_password_or_url, but let's verify it still works
         with pytest.raises(ValidationError) as exc_info:
-            Settings(
+            make_settings(
                 secret_key="test-secret-key-for-testing-only-32-chars",
                 db_driver="postgres",
                 database_url=DEFAULT_SQLITE_URL,  # SQLite URL, not postgres
                 postgres_password=None,  # Explicitly None to override env vars
             )
         assert "DB_DRIVER=postgres requires either DATABASE_URL" in str(exc_info.value)
-

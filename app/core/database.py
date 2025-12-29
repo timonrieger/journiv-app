@@ -8,6 +8,7 @@ from pathlib import Path
 
 from sqlalchemy import event
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine, Session, select
 
@@ -52,7 +53,7 @@ if database_type == "sqlite":
         cursor.execute("PRAGMA temp_store=MEMORY")  # Use memory for temp tables
         cursor.close()
 
-elif database_type == "postgresql":
+elif database_type in {"postgres", "postgresql"}:
     # PostgreSQL-specific optimizations
     engine_kwargs = {
         "echo": False,
@@ -121,6 +122,21 @@ def get_session():
         yield session
 
 
+def get_session_context():
+    """
+    Get database session as context manager.
+
+    Use this for background tasks and non-request contexts.
+    Returns a context manager that yields a session.
+
+    Example:
+        with get_session_context() as session:
+            # use session
+            pass
+    """
+    return Session(engine)
+
+
 def seed_initial_data():
     """Seed initial data if database is empty."""
     import os
@@ -155,6 +171,9 @@ def seed_initial_data():
                 seed_prompts(session)
             else:
                 logger.info("Prompts already exist, skipping prompt seeding")
+
+            # Seed instance details
+            seed_instance_details(session)
 
         except Exception as e:
             logger.error(e)
@@ -201,6 +220,95 @@ def seed_prompts(session: Session):
     """Seed prompts from JSON file."""
     from app.models.prompt import Prompt
     _seed_data_from_json(session, Prompt, PROJECT_ROOT / "scripts/prompts.json", "text")
+
+
+def seed_instance_details(session: Session):
+    """Seed the singleton InstanceDetail row and invalidate license cache if needed."""
+    from app.models.instance_detail import InstanceDetail
+    from app.core.install_id import generate_install_id
+    from app.core.license_cache import get_license_cache
+
+    install_id = None
+    old_install_id = None
+    is_sqlite = database_type == "sqlite"
+
+    try:
+        if is_sqlite:
+            instance = session.exec(select(InstanceDetail).limit(1)).first()
+        else:
+            instance = session.exec(select(InstanceDetail).limit(1).with_for_update()).first()
+
+        if not instance:
+            logger.info("Initializing InstanceDetail with new install_id...")
+            install_id = generate_install_id()
+            instance = InstanceDetail(install_id=install_id, singleton_marker=1)
+            session.add(instance)
+            try:
+                session.commit()
+                session.refresh(instance)
+            except IntegrityError:
+                session.rollback()
+                logger.warning("Concurrent InstanceDetail creation detected, retrying fetch")
+                if is_sqlite:
+                    instance = session.exec(select(InstanceDetail).limit(1)).first()
+                else:
+                    instance = session.exec(select(InstanceDetail).limit(1).with_for_update()).first()
+                if not instance:
+                    raise RuntimeError("Failed to create or retrieve InstanceDetail after concurrent creation")
+                if instance.install_id:
+                    install_id = instance.install_id
+                else:
+                    install_id = generate_install_id()
+                    instance.install_id = install_id
+                    session.add(instance)
+                    session.commit()
+                    session.refresh(instance)
+        elif not instance.install_id:
+            logger.info("Updating existing InstanceDetail with missing install_id...")
+            install_id = generate_install_id()
+            instance.install_id = install_id
+            session.add(instance)
+            session.commit()
+            session.refresh(instance)
+        else:
+            current_install_id = generate_install_id()
+            if instance.install_id != current_install_id:
+                logger.warning(
+                    "Detected install_id drift; rotating identity and clearing secrets",
+                    extra={"old_install_id": instance.install_id, "new_install_id": current_install_id},
+                )
+                old_install_id = instance.install_id
+                instance.install_id = current_install_id
+                instance.plus_instance_secret = None
+                instance.signed_license = None
+                instance.license_validated_at = None
+                install_id = current_install_id
+                session.add(instance)
+                session.commit()
+                session.refresh(instance)
+            else:
+                install_id = instance.install_id
+                logger.info("InstanceDetail already initialized with install_id")
+
+    except IntegrityError as e:
+        session.rollback()
+        logger.error(f"IntegrityError during InstanceDetail seeding: {e}")
+        raise RuntimeError(f"Failed to seed InstanceDetail due to constraint violation: {e}") from e
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Unexpected error during InstanceDetail seeding: {e}")
+        raise
+
+    if install_id:
+        try:
+            cache = get_license_cache()
+            cache.invalidate(install_id)
+            logger.info(f"Invalidated license cache for install_id={install_id}")
+            if old_install_id:
+                cache.invalidate(old_install_id)
+                logger.info(f"Invalidated license cache for old install_id={old_install_id}")
+        except Exception as e:
+            logger.warning(f"Failed to invalidate license cache: {e}")
 
 
 def init_db():

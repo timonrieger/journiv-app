@@ -20,7 +20,7 @@ from app.schemas.auth import Token, LoginResponse, UserLogin, TokenRefresh
 from app.schemas.user import UserResponse, UserCreate
 from app.services.user_service import UserService
 
-router = APIRouter()
+router = APIRouter(prefix="/auth", tags=["authentication"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 
 

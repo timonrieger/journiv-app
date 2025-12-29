@@ -1,6 +1,7 @@
 # Import all models for easy access
 from .analytics import WritingStreak
 from .base import BaseModel
+from .instance_detail import InstanceDetail
 from .entry import Entry, EntryMedia
 from .entry_tag_link import EntryTagLink
 from .export_job import ExportJob
@@ -28,4 +29,5 @@ __all__ = [
     "ExternalIdentity",
     "ImportJob",
     "ExportJob",
+    "InstanceDetail",
 ]

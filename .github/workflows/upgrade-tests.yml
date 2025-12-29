@@ -70,8 +70,13 @@ jobs:
       - name: Cleanup previous Docker state
         run: |
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            COMPOSE_FILE="docker-compose.yml"
+          else
+            COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+          fi
           docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             -f docker-compose.override.old-version.yml \
             down -v 2>/dev/null || true
@@ -131,15 +136,20 @@ jobs:
         run: |
           echo "🚀 Starting OLD version (${{ env.OLD_VERSION }}) on ${{ matrix.database }}..."
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            COMPOSE_FILE="docker-compose.yml"
+          else
+            COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+          fi
 
           APP_VERSION=old docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             -f docker-compose.override.old-version.yml \
             --env-file .env up -d
 
           APP_VERSION=old docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             -f docker-compose.override.old-version.yml \
             ps
@@ -162,8 +172,13 @@ jobs:
 
           echo "❌ OLD version failed to start"
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            COMPOSE_FILE="docker-compose.yml"
+          else
+            COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+          fi
           APP_VERSION=old docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             -f docker-compose.override.old-version.yml \
             logs app
@@ -187,15 +202,20 @@ jobs:
         run: |
           echo "⏸️ Stopping OLD version (preserving data volumes)..."
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            COMPOSE_FILE="docker-compose.yml"
+          else
+            COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+          fi
 
           APP_VERSION=old docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             -f docker-compose.override.old-version.yml \
             stop
 
           APP_VERSION=old docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             -f docker-compose.override.old-version.yml \
             rm -f
@@ -217,14 +237,19 @@ jobs:
         run: |
           echo "🚀 Starting NEW version (${{ env.NEW_VERSION }}) with preserved data on ${{ matrix.database }}..."
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            COMPOSE_FILE="docker-compose.yml"
+          else
+            COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+          fi
 
           APP_VERSION=${{ env.NEW_VERSION }} docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             --env-file .env up -d
 
           APP_VERSION=${{ env.NEW_VERSION }} docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             ps
 
@@ -246,8 +271,13 @@ jobs:
 
           echo "❌ NEW version failed to start"
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            COMPOSE_FILE="docker-compose.yml"
+          else
+            COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+          fi
           APP_VERSION=${{ env.NEW_VERSION }} docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             logs app
           exit 1
@@ -270,10 +300,15 @@ jobs:
         if: failure()
         run: |
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            COMPOSE_FILE="docker-compose.yml"
+          else
+            COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+          fi
 
           echo "📋 App logs:"
           APP_VERSION=${{ env.NEW_VERSION }} docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             logs app || true
 
@@ -281,7 +316,7 @@ jobs:
             echo ""
             echo "📋 Postgres logs:"
             APP_VERSION=${{ env.NEW_VERSION }} docker compose \
-              -f docker-compose.prod.${{ matrix.database }}.yml \
+              -f $COMPOSE_FILE \
               -f docker-compose.override.ci.yml \
               logs postgres || true
           fi
@@ -294,9 +329,14 @@ jobs:
         run: |
           echo "🧹 Cleaning up..."
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            COMPOSE_FILE="docker-compose.yml"
+          else
+            COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+          fi
 
           APP_VERSION=${{ env.NEW_VERSION }} docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             down -v || true
 

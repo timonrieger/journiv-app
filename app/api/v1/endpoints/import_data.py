@@ -21,7 +21,7 @@ from app.services.import_service import ImportService
 from app.tasks.import_tasks import process_import_job
 from app.utils.import_export.media_handler import MediaHandler
 
-router = APIRouter()
+router = APIRouter(prefix="/import", tags=["import-export"])
 
 
 @router.post(

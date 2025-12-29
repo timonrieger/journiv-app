@@ -1,17 +1,192 @@
+# Journiv Production Docker Compose (PostgreSQL).
+# Journiv recommends using PostgreSQL based deployment over SQLite.
+#
+# Usage:
+#   docker compose up -d
+#
+# Required Environment Variables:
+#   SECRET_KEY      - Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+#   DOMAIN_NAME     - Needed when running in same-origin SPA mode (ENABLE_CORS=false).
+#   POSTGRES_PASSWORD - Must be provided in .env file.
+
+x-base-env: &base-env
+  REDIS_URL: redis://valkey:6379/0
+  CELERY_BROKER_URL: redis://valkey:6379/0
+  CELERY_RESULT_BACKEND: redis://valkey:6379/0
+  DB_DRIVER: postgres
+  POSTGRES_HOST: postgres
+
+x-celery-common: &celery-common
+  image: swalabtech/journiv-app:${APP_VERSION:-latest}
+  env_file: .env
+  volumes:
+    - app_data:/data
+  depends_on:
+    postgres:
+      condition: service_healthy
+    valkey:
+      condition: service_healthy
+  networks:
+    - backend
+  restart: unless-stopped
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "50m"
+      max-file: "5"
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 1g
+      reservations:
+        memory: 256m
+
+x-app-common: &app-common
+  image: swalabtech/journiv-app:${APP_VERSION:-latest}
+  env_file: .env
+  volumes:
+    - app_data:/data
+  depends_on:
+    postgres:
+      condition: service_healthy
+    valkey:
+      condition: service_healthy
+  networks:
+    - backend
+  restart: unless-stopped
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+x-celery-healthcheck: &celery-healthcheck
+  interval: 30s
+  timeout: 10s
+  retries: 5
+  start_period: 40s
+
 services:
-  journiv:
-    image: swalabtech/journiv-app:latest
-    container_name: journiv
-    ports:
-      # if you want to expose on a different port, change the left hand side of colon to the port
-      # you want to expose on do not change the 8000 on the right hand side
-      - "8000:8000"
+  postgres:
+    image: postgres:15
+    container_name: journiv-postgres-db
     environment:
-      - SECRET_KEY=your-secret-key-here # (REQUIRED) Replace with a strong secret key
-      - DOMAIN_NAME=192.168.1.1 # (REQUIRED) Your server IP or domain
+      - POSTGRES_USER=${POSTGRES_USER:-journiv}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD} # must provide a password in .env file
+      - POSTGRES_DB=${POSTGRES_DB:-journiv_prod}
     volumes:
-      - journiv_data:/data
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+        reservations:
+          memory: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-journiv} -d ${POSTGRES_DB:-journiv_prod}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  valkey:
+    # Journiv uses Valkey which is similar to Redis for cache.
+    image: valkey/valkey:8.0-alpine
+    container_name: journiv-valkey-cache
+    restart: unless-stopped
+    volumes:
+      - valkey_data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  celery-worker:
+    <<: *celery-common
+    container_name: journiv-celery-worker
+    command: celery -A app.core.celery_app worker --loglevel=info
+    environment:
+      <<: *base-env
+      SERVICE_ROLE: celery-worker
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A app.core.celery_app inspect ping --timeout=5 | grep -q pong",
+        ]
+      <<: *celery-healthcheck
+
+  celery-beat:
+    <<: *celery-common
+    container_name: journiv-celery-beat
+    command: celery -A app.core.celery_app beat --loglevel=info --scheduler redbeat.RedBeatScheduler
+    environment:
+      <<: *base-env
+      SERVICE_ROLE: celery-beat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      REDBEAT_REDIS_URL: redis://valkey:6379/2
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pgrep -f 'celery.*beat' > /dev/null || exit 1",
+        ]
+      <<: *celery-healthcheck
+
+  app:
+    <<: *app-common
+    container_name: journiv-postgres-app
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    environment:
+      <<: *base-env
+      SERVICE_ROLE: app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      ENVIRONMENT: production
+      RATE_LIMIT_STORAGE_URI: redis://valkey:6379/1
+    networks:
+      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+        reservations:
+          memory: 512m
 
 volumes:
-  journiv_data:
+  app_data:
+  postgres_data:
+  valkey_data:
+
+networks:
+  backend:
+    driver: bridge
+  frontend:
+    driver: bridge

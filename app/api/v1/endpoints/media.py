@@ -28,9 +28,8 @@ from app.services.file_processing_service import FileProcessingService
 
 file_logger = logging.getLogger(LogCategory.FILE_UPLOADS.value)
 error_logger = logging.getLogger(LogCategory.ERRORS.value)
-security_logger = logging.getLogger(LogCategory.SECURITY.value)
 
-router = APIRouter()
+router = APIRouter(prefix="/media", tags=["media"])
 
 
 def _get_media_service():

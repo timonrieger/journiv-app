@@ -3,7 +3,7 @@ Tag schemas.
 """
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict
 
 from pydantic import BaseModel, validator
 
@@ -62,3 +62,62 @@ class EntryTagLinkResponse(EntryTagLinkBase, TimestampMixin):
     """Entry tag link response schema."""
     created_at: datetime
     updated_at: datetime
+
+
+class TagSummary(BaseModel):
+    """Shared tag summary model used across statistics, tag lists, and related tags."""
+    id: uuid.UUID
+    name: str
+    usage_count: int
+
+
+class TagStatisticsResponse(BaseModel):
+    """Tag usage statistics response schema."""
+    total_tags: int
+    used_tags: int
+    unused_tags: int
+    most_used_tag: Optional[TagSummary]
+    average_usage: float
+    tag_usage_ranking: List[TagSummary]
+    recently_created_tags: List[TagSummary]
+    usage_over_time: Optional[Dict[str, int]] = None
+
+
+class TagAnalyticsResponse(TagStatisticsResponse):
+    """Extended tag analytics response schema with required time-series data."""
+    usage_over_time: Dict[str, int]
+    tag_distribution: Dict[str, int]
+
+
+class PeakMonth(BaseModel):
+    """Peak month information."""
+    month: str  # Format: "YYYY-MM"
+    count: int
+
+
+class TagDetailAnalyticsResponse(BaseModel):
+    """
+    Per-tag analytics response.
+
+    Provides detailed analytics for a specific tag including usage trends,
+    peak months, and growth analysis.
+    """
+    # Tag information
+    tag_id: uuid.UUID
+    tag_name: str
+    usage_count: int
+
+    # Time-series data
+    usage_over_time: Dict[str, int]  # month_key -> count
+
+    # Usage timeframe
+    first_used: Optional[datetime] = None
+    last_used: Optional[datetime] = None
+
+    # Plus-computed insights
+    peak_month: Optional[PeakMonth] = None
+    trend: str  # "increasing", "decreasing", "stable", "insufficient_data"
+    growth_rate: Optional[float] = None  # Percentage growth rate
+
+    # Metadata
+    days_analyzed: int

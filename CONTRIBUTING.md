@@ -53,7 +53,7 @@ Before you begin, ensure you have:
    docker compose -f docker-compose.dev.sqlite.yml up -d
 
    # Or with PostgreSQL (for testing PostgreSQL-specific features)
-   docker compose -f docker-compose.dev.postgres.yml up -d
+   docker compose -f docker-compose.dev.yml up -d
    ```
 
    **Option B: Local Development**
@@ -126,7 +126,7 @@ LOG_DIR=./logs
 **PostgreSQL (Optional)**
 - For multi-user production-like testing
 - Requires PostgreSQL service running
-- Use `docker-compose.dev.postgres.yml` for PostgreSQL development
+- Use `docker-compose.dev.yml` for PostgreSQL development
 
 ## Project Structure
 

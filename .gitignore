@@ -203,11 +203,12 @@ $RECYCLE.BIN/
 .Trash-*
 .nfs*
 
-# ===============================================================
 # JUPYTER / NOTEBOOKS
-# ===============================================================
-
 .ipynb_checkpoints/
+
+# Compile artifacts
+# Compiled Journiv Plus module
+app/plus/*.so
 
 # ===============================================================
 # END OF FILE

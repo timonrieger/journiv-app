@@ -19,7 +19,7 @@ from app.schemas.mood import (
 )
 from app.services.mood_service import MoodService
 
-router = APIRouter()
+router = APIRouter(prefix="/moods", tags=["moods"])
 
 
 

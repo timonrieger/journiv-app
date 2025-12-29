@@ -4,7 +4,7 @@
 #
 #
 # Usage in CI workflows:
-#   docker compose -f docker-compose.prod.sqlite.yml -f docker-compose.override.ci.yml up -d
+#   docker compose -f docker-compose.sqlite.yml -f docker-compose.override.ci.yml up -d
 #
 # Multiple -f flags merge the compose files, with later files overriding earlier ones.
 
