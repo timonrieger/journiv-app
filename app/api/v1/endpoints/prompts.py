@@ -15,7 +15,7 @@ from app.models.user import User
 from app.schemas.prompt import PromptResponse
 from app.services.prompt_service import PromptService
 
-router = APIRouter()
+router = APIRouter(prefix="/prompts", tags=["prompts"])
 
 
 # System Prompts (Protected access)

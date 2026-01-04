@@ -4,6 +4,14 @@ set -e
 echo "Ensuring data directories exist..."
 mkdir -p /data/media /data/logs
 
+if [ "${SERVICE_ROLE:-app}" = "celery-worker" ]; then
+  echo "Starting Celery worker..."
+  exec celery -A app.core.celery_app worker --loglevel=info
+elif [ "${SERVICE_ROLE:-app}" = "celery-beat" ]; then
+  echo "Starting Celery beat..."
+  exec celery -A app.core.celery_app beat --loglevel=info --scheduler redbeat.RedBeatScheduler
+fi
+
 echo "Running database migrations in entrypoint script..."
 alembic upgrade head
 

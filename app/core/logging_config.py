@@ -17,6 +17,7 @@ class LogCategory(str, Enum):
     ERRORS = "app.errors"
     DB = "app.db"
     SECURITY = "app.security"
+    PLUS = "app.plus"
 
 
 DEFAULT_LOG_LEVEL = logging.INFO
@@ -262,6 +263,12 @@ def log_info(message: str, request_id: str = None, **kwargs):
     """Log info messages with request ID."""
     logger = logging.getLogger(LogCategory.APP)
     _log_with_context(logger, logging.INFO, message, request_id, **kwargs)
+
+
+def log_debug(message: str, request_id: str = None, **kwargs):
+    """Log debug messages with request ID."""
+    logger = logging.getLogger(LogCategory.APP)
+    _log_with_context(logger, logging.DEBUG, message, request_id, **kwargs)
 
 
 def log_warning(message: str, request_id: str = None, **kwargs):

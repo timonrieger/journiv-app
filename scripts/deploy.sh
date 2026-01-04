@@ -101,13 +101,13 @@ fi
 # Determine compose file
 if [[ "$ENVIRONMENT" == "production" ]]; then
     if [[ "$DATABASE" == "postgresql" ]]; then
-        COMPOSE_FILE="docker-compose.prod.postgres.yml"
+        COMPOSE_FILE="docker-compose.yml"
     else
-        COMPOSE_FILE="docker-compose.prod.sqlite.yml"
+        COMPOSE_FILE="docker-compose.sqlite.yml"
     fi
 else
     if [[ "$DATABASE" == "postgresql" ]]; then
-        COMPOSE_FILE="docker-compose.dev.postgres.yml"
+        COMPOSE_FILE="docker-compose.dev.yml"
     else
         COMPOSE_FILE="docker-compose.dev.sqlite.yml"
     fi

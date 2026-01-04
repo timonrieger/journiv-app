@@ -7,16 +7,16 @@ from typing import Annotated, List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlmodel import Session
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user, get_plus_factory
 from app.core.database import get_session
 from app.core.exceptions import TagNotFoundError
 from app.core.logging_config import log_error
 from app.models.user import User
 from app.schemas.entry import EntryPreviewResponse
-from app.schemas.tag import TagCreate, TagUpdate, TagResponse, EntryTagLinkResponse
+from app.schemas.tag import TagCreate, TagUpdate, TagResponse, EntryTagLinkResponse, TagAnalyticsResponse, TagDetailAnalyticsResponse
 from app.services.tag_service import TagService
 
-router = APIRouter()
+router = APIRouter(prefix="/tags", tags=["tags"])
 
 
 # Tag CRUD Operations
@@ -28,7 +28,6 @@ router = APIRouter()
         400: {"description": "Invalid tag data"},
         401: {"description": "Not authenticated"},
         403: {"description": "Account inactive"},
-        409: {"description": "Tag with same name already exists"},
     }
 )
 async def create_tag(
@@ -122,26 +121,136 @@ async def search_tags(
     return tags
 
 
+# Tag Analytics
 @router.get(
-    "/statistics",
-    response_model=Dict[str, Any],
+    "/analytics",
+    response_model=TagAnalyticsResponse,
+    tags=["plus"],
     responses={
         401: {"description": "Not authenticated"},
-        403: {"description": "Account inactive"},
+        403: {"description": "Plus license required or invalid"},
+        503: {"description": "Plus features not available in this build"},
+        500: {"description": "Internal server error"},
     }
 )
-async def get_tag_statistics_alt(
+async def get_tag_analytics(
     current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[Session, Depends(get_session)]
+    session: Annotated[Session, Depends(get_session)],
+    plus_factory=Depends(get_plus_factory)
 ):
     """
-    Get tag usage statistics for the current user.
+    Get detailed tag analytics.
 
-    Includes total tags count, most used tags, and usage trends.
+    Returns detailed analytics with required time-series data (usage_over_time),
+    tag distribution, and all statistics.
+
+    **Requires:** Valid Journiv Plus license
     """
-    tag_service = TagService(session)
-    statistics = tag_service.get_tag_statistics(current_user.id)
-    return statistics
+    try:
+        tag_service = TagService(session)
+        analytics = tag_service.get_tag_analytics(current_user.id, plus_factory)
+        return analytics
+
+    except PermissionError as e:
+        # This should not happen since get_plus_factory already validates
+        # But we catch it as defense in depth
+        log_error(
+            e,
+            request_id="",
+            user_email=current_user.email,
+            extra_context=f"License verification failed in service layer: {e}"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "license_verification_failed",
+                "message": f"License verification failed: {str(e)}",
+                "action": "Please verify your license or contact support"
+            }
+        )
+    except Exception as e:
+        log_error(
+            e,
+            request_id="",
+            user_email=current_user.email,
+            extra_context=f"Error fetching tag analytics: {e}"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while fetching tag analytics"
+        )
+
+
+@router.get(
+    "/{tag_id}/analytics",
+    response_model=TagDetailAnalyticsResponse,
+    tags=["plus"],
+    responses={
+        401: {"description": "Not authenticated"},
+        403: {"description": "Plus license required or invalid"},
+        404: {"description": "Tag not found"},
+        503: {"description": "Plus features not available in this build"},
+        500: {"description": "Internal server error"},
+    }
+)
+async def get_tag_detail_analytics(
+    tag_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)],
+    plus_factory=Depends(get_plus_factory),
+    days: int = Query(365, ge=1, le=3650, description="Number of days to analyze")
+):
+    """
+    Get detailed analytics for a specific tag.
+
+    Returns trend analysis, peak month, growth rate, and usage over time
+    for the specified tag.
+
+    **Requires:** Valid Journiv Plus license
+    """
+    try:
+        tag_service = TagService(session)
+        analytics = tag_service.get_tag_detail_analytics(
+            tag_id=tag_id,
+            user_id=current_user.id,
+            plus_factory=plus_factory,
+            days=days
+        )
+        return analytics
+
+    except TagNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Tag not found"
+        )
+    except PermissionError as e:
+        # This should not happen since get_plus_factory already validates
+        # But we catch it as defense in depth
+        log_error(
+            e,
+            request_id="",
+            user_email=current_user.email,
+            extra_context=f"License verification failed in service layer: {e}"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "license_verification_failed",
+                "message": f"License verification failed: {str(e)}",
+                "action": "Please verify your license or contact support"
+            }
+        )
+    except Exception as e:
+        log_error(
+            e,
+            request_id="",
+            user_email=current_user.email,
+            extra_context=f"Error fetching tag detail analytics: {e}"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while fetching tag analytics"
+        )
 
 
 @router.get(
@@ -255,6 +364,62 @@ async def delete_tag(
         )
 
 
+@router.post(
+    "/{source_id}/merge/{target_id}",
+    response_model=TagResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        400: {"description": "Invalid merge operation (e.g., merging into self)"},
+        401: {"description": "Not authenticated"},
+        403: {"description": "Account inactive"},
+        404: {"description": "Source or target tag not found"},
+        500: {"description": "Internal server error"},
+    }
+)
+async def merge_tags(
+    source_id: uuid.UUID,
+    target_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[Session, Depends(get_session)]
+):
+    """
+    Merge source tag into target tag.
+
+    Moves all entry-tag links from source to target, then deletes source tag.
+    Enforces case-normalization: prevents merging tags that differ only by case.
+    """
+    tag_service = TagService(session)
+    try:
+        # Prevent merging into self
+        if source_id == target_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot merge tag into itself"
+            )
+
+        merged_tag = tag_service.merge_tags(source_id, target_id, current_user.id)
+        return merged_tag
+    except TagNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except HTTPException:
+        # Propagate deliberate HTTPExceptions (e.g., merging into self) unchanged
+        raise
+    except Exception as e:
+        log_error(e, request_id="", user_email=current_user.email)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while merging tags"
+        )
+
+
 # Entry-Tag Association Operations
 @router.post(
     "/entry/{entry_id}/tag/{tag_id}",
@@ -351,8 +516,20 @@ async def get_entry_tags(
 ):
     """Get all tags for an entry."""
     tag_service = TagService(session)
-    tags = tag_service.get_entry_tags(entry_id, current_user.id)
-    return tags
+    try:
+        tags = tag_service.get_entry_tags(entry_id, current_user.id)
+        return tags
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except Exception as e:
+        log_error(e, request_id="", user_email=current_user.email)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while retrieving entry tags"
+        )
 
 
 @router.post(
@@ -443,26 +620,3 @@ async def get_entries_by_tag(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Tag not found"
         )
-
-
-# Tag Analytics
-@router.get(
-    "/analytics/statistics",
-    response_model=Dict[str, Any],
-    responses={
-        401: {"description": "Not authenticated"},
-        403: {"description": "Account inactive"},
-    }
-)
-async def get_tag_statistics(
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[Session, Depends(get_session)]
-):
-    """
-    Get tag usage statistics for the current user.
-
-    Includes total tags count, most used tags, and usage trends.
-    """
-    tag_service = TagService(session)
-    statistics = tag_service.get_tag_statistics(current_user.id)
-    return statistics

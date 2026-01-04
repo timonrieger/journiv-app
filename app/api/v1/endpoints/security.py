@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.core.csp_config import get_csp_config
 from app.core.logging_config import log_error
 
-router = APIRouter()
+router = APIRouter(prefix="/security", tags=["security"])
 
 
 class CSPViolationReport(BaseModel):

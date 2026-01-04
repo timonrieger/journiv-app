@@ -23,7 +23,7 @@ from app.schemas.dto import (
 from app.services.export_service import ExportService
 from app.tasks.export_tasks import process_export_job
 
-router = APIRouter()
+router = APIRouter(prefix="/export", tags=["import-export"])
 
 
 def _get_download_url(request: Request, job_id: uuid.UUID) -> Optional[str]:

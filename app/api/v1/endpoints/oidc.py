@@ -19,7 +19,7 @@ from app.schemas.auth import LoginResponse
 from app.services.user_service import UserService
 from app.models.external_identity import ExternalIdentity
 
-router = APIRouter(prefix="/auth/oidc")
+router = APIRouter(prefix="/auth/oidc", tags=["authentication"])
 
 
 def register_oidc_provider():
@@ -179,10 +179,10 @@ async def oidc_callback(
     if email and not claims.get('email_verified', False):
         log_error(f"OIDC login failed: Email {email} not verified by identity provider.", subject=subject)
         raise HTTPException(
-            status_code=403, 
+            status_code=403,
             detail="Email not verified by identity provider"
         )
-        
+
     # Normalize email to lowercase immediately after security checks
     # This ensures consistency for all subsequent database lookups (Issue #166 and #171 comment)
     if email:

@@ -18,7 +18,7 @@ from app.core.database import get_session
 from app.core.logging_config import log_error
 from app.core.config import settings
 
-router = APIRouter()
+router = APIRouter(tags=["health"])
 
 
 def _utc_now_iso() -> str:

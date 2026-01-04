@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, FileResponse, Response
@@ -30,6 +31,7 @@ from app.core.exceptions import (
     TagNotFoundError, UnauthorizedError,
 )
 from app.core.logging_config import setup_logging, log_info, log_warning, log_error
+from app.core.http_client import close_http_client
 from app.core.rate_limiting import limiter, rate_limit_exceeded_handler
 from app.middleware.request_logging import request_id_ctx, RequestLoggingMiddleware
 from app.middleware.csp_middleware import create_csp_middleware
@@ -51,11 +53,27 @@ async def lifespan(app: FastAPI):
         if settings.oidc_enabled:
             app.state.cache = create_cache(settings.redis_url)
             log_info("Cache initialization completed!")
+
+        # Log Plus features availability
+        try:
+            from app.plus import PLUS_FEATURES_AVAILABLE
+            if PLUS_FEATURES_AVAILABLE:
+                log_info("Journiv Plus features are available")
+            else:
+                log_warning("Journiv Plus features are not available (using placeholders)")
+        except Exception as e:
+            log_warning(f"Could not check Plus features availability: {e}")
+
     except Exception as exc:
         log_error(exc)
         raise
     yield
     log_info("Shutting down Journiv Service...")
+    try:
+        await close_http_client()
+        log_info("HTTP client closed")
+    except Exception as exc:
+        log_warning(f"Failed to close HTTP client: {exc}")
 
 
 # -----------------------------------------------------------------------------
@@ -203,6 +221,40 @@ async def add_process_time_header(request: Request, call_next):
 # -----------------------------------------------------------------------------
 # Exception Handlers
 # -----------------------------------------------------------------------------
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle FastAPI request validation errors with detailed logging."""
+    request_id = request_id_ctx.get()
+    errors = exc.errors()
+
+    sanitized_errors = [
+        {
+            "loc": err.get("loc"),
+            "msg": err.get("msg"),
+            "type": err.get("type")
+        }
+        for err in errors
+    ]
+
+    log_warning(
+        "Request validation failed",
+        request_id=request_id,
+        path=request.url.path,
+        method=request.method,
+        errors=sanitized_errors,
+        event="validation_error"
+    )
+
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "validation_error",
+            "message": errors,
+            "request_id": request_id
+        },
+    )
+
+
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
     request_id = request_id_ctx.get()

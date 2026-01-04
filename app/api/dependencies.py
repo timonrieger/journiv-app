@@ -2,13 +2,14 @@
 Shared API dependencies.
 """
 import logging
-from typing import Annotated, Optional
+from typing import Annotated, Optional, Callable
 
 from fastapi import Depends, HTTPException, status, Cookie
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, ExpiredSignatureError
 from sqlmodel import Session
 
+from app.core.config import JOURNIV_PLUS_DOC_URL
 from app.core.database import get_session
 from app.core.security import verify_token
 from app.middleware.request_logging import request_id_ctx
@@ -19,6 +20,9 @@ from app.services.user_service import UserService
 logger = logging.getLogger(__name__)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
+
+# Alias for database session dependency
+get_db = get_session
 
 
 def get_request_id() -> str:
@@ -126,3 +130,91 @@ async def get_current_admin_user(
         )
 
     return current_user
+
+
+async def get_plus_factory(
+    session: Annotated[Session, Depends(get_session)]
+):
+    """
+    Dependency to get PlusFeatureFactory instance.
+
+    Raises:
+        HTTPException 403: If license is not found or validation fails
+        HTTPException 503: If Plus features are not available in this build
+        RuntimeError: If SECRET_KEY environment variable is not set
+    """
+    try:
+        # Import Plus components
+        from app.plus import PlusFeatureFactory, PLUS_FEATURES_AVAILABLE
+        from app.models.instance_detail import InstanceDetail
+
+        # Check if Plus features are available in this build
+        if not PLUS_FEATURES_AVAILABLE:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": "plus_not_available",
+                    "message": "Plus features are not available in this build",
+                    "upgrade_url": JOURNIV_PLUS_DOC_URL
+                }
+            )
+
+        # Get instance details from database
+        instance = session.query(InstanceDetail).first()
+
+        if not instance:
+            logger.error("No instance details found in database")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": "no_instance",
+                    "message": "Instance not initialized"
+                }
+            )
+
+        # Check if signed license exists
+        if not instance.signed_license:
+            logger.info("No Plus license found", extra={"install_id": instance.install_id})
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": "license_required",
+                    "message": "Journiv Plus license required for this feature",
+                    "upgrade_url": JOURNIV_PLUS_DOC_URL
+                }
+            )
+
+        # Create and return factory
+        # Factory generates platform_id internally for hardware change detection
+        try:
+            factory = PlusFeatureFactory(
+                signed_license=instance.signed_license
+            )
+            return factory
+
+        except PermissionError as e:
+            # License verification failed in compiled code
+            logger.error(
+                "License verification failed in PlusFeatureFactory",
+                extra={"error": str(e)}
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": "license_invalid",
+                    "message": "License verification failed",
+                    "action": "Please check your license or contact support"
+                }
+            )
+
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in get_plus_factory: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while initializing Plus features"
+        )
+
+

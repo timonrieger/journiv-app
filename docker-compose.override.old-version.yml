@@ -4,7 +4,7 @@
 # Older versions may not have celery-worker service, so we scale it to 0.
 #
 # Usage:
-#   docker compose -f docker-compose.prod.sqlite.yml \
+#   docker compose -f docker-compose.sqlite.yml \
 #     -f docker-compose.override.ci.yml \
 #     -f docker-compose.override.old-version.yml \
 #     up -d

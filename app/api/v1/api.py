@@ -4,7 +4,7 @@ API v1 router.
 from fastapi import APIRouter
 from app.api.v1.endpoints import (
     auth, users, journals, entries, moods, prompts, tags,
-    analytics, media, health, security, oidc, admin
+    analytics, media, health, security, oidc, admin, version, license
 )
 # Import/Export routers
 from app.api.v1.endpoints.export_data import router as export_router
@@ -13,18 +13,20 @@ from app.api.v1.endpoints.import_data import router as import_router
 api_router = APIRouter()
 
 # Include all endpoint routers
-api_router.include_router(auth.router, prefix="/auth", tags=["authentication"])
-api_router.include_router(oidc.router, tags=["authentication"])  # OIDC routes (prefix already in router)
-api_router.include_router(users.router, prefix="/users", tags=["users"])
-api_router.include_router(journals.router, prefix="/journals", tags=["journals"])
-api_router.include_router(entries.router, prefix="/entries", tags=["entries"])
-api_router.include_router(moods.router, prefix="/moods", tags=["moods"])
-api_router.include_router(prompts.router, prefix="/prompts", tags=["prompts"])
-api_router.include_router(tags.router, prefix="/tags", tags=["tags"])
-api_router.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
-api_router.include_router(media.router, prefix="/media", tags=["media"])
-api_router.include_router(export_router, prefix="/export", tags=["import-export"])
-api_router.include_router(import_router, prefix="/import", tags=["import-export"])
-api_router.include_router(health.router, tags=["health"])
-api_router.include_router(security.router, prefix="/security", tags=["security"])
-api_router.include_router(admin.router, tags=["admin"])  # Admin routes (prefix already in router)
+api_router.include_router(auth.router)
+api_router.include_router(oidc.router)
+api_router.include_router(users.router)
+api_router.include_router(journals.router)
+api_router.include_router(entries.router)
+api_router.include_router(moods.router)
+api_router.include_router(prompts.router)
+api_router.include_router(tags.router)
+api_router.include_router(analytics.router)
+api_router.include_router(media.router)
+api_router.include_router(export_router)
+api_router.include_router(import_router)
+api_router.include_router(health.router)
+api_router.include_router(security.router)
+api_router.include_router(version.router)
+api_router.include_router(admin.router)
+api_router.include_router(license.router)
