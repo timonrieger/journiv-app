@@ -64,7 +64,7 @@ x-celery-healthcheck: &celery-healthcheck
 services:
   # Journiv uses Valkey which is similar to Redis for cache.
   valkey:
-    image: valkey/valkey:8.0-alpine
+    image: valkey/valkey:9.0-alpine
     container_name: journiv-valkey-cache
     restart: unless-stopped
     volumes:

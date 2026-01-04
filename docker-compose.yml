@@ -69,14 +69,14 @@ x-celery-healthcheck: &celery-healthcheck
 
 services:
   postgres:
-    image: postgres:15
+    image: postgres:18.1
     container_name: journiv-postgres-db
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-journiv}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD} # must provide a password in .env file
       - POSTGRES_DB=${POSTGRES_DB:-journiv_prod}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
     networks:
       - backend
     restart: unless-stopped
@@ -105,7 +105,7 @@ services:
 
   valkey:
     # Journiv uses Valkey which is similar to Redis for cache.
-    image: valkey/valkey:8.0-alpine
+    image: valkey/valkey:9.0-alpine
     container_name: journiv-valkey-cache
     restart: unless-stopped
     volumes:
