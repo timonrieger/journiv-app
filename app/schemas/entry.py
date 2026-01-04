@@ -68,6 +68,7 @@ class EntryPreviewResponse(TimestampMixin):
     content: str  # Truncated by endpoint
     journal_id: uuid.UUID
     created_at: datetime
+    updated_at: datetime
     entry_date: date
     entry_datetime_utc: datetime
     entry_timezone: str
