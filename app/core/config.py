@@ -16,6 +16,10 @@ try:
 except ImportError:
     make_url = None
 
+# Import version from package
+# Using JOURNIV_VERSION (not APP_VERSION) to prevent APP_VERSION env var from overriding app_version field
+from app import __version__ as JOURNIV_VERSION
+
 logger = logging.getLogger(__name__)
 
 # Insecure default that should never be used in production
@@ -37,7 +41,9 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "Journiv Service"
-    app_version: str = "0.1.0-beta.11"
+    # Version is forced from app.__init__.py via model_validator (see force_app_version_from_code)
+    # This prevents APP_VERSION env var from overriding the code version
+    app_version: str = ""  # Will be overridden by validator
     debug: bool = False
     environment: str = "development"
     domain_name: str = ""
@@ -601,6 +607,12 @@ class Settings(BaseSettings):
             return redis_url
 
         return v
+
+    @model_validator(mode='after')
+    def force_app_version_from_code(self) -> 'Settings':
+        """Force app_version to always use the version from code, ignoring env vars."""
+        self.app_version = JOURNIV_VERSION
+        return self
 
     @model_validator(mode='after')
     def construct_oidc_redirect_uri(self) -> 'Settings':

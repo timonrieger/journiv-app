@@ -46,6 +46,7 @@ setup_logging()
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
     log_info("Starting up Journiv Service...")
+    log_info(f"Journiv version: {settings.app_version}")
     try:
         init_db()
         log_info("Database initialization completed!")
