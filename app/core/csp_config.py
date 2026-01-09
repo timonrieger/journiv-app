@@ -232,9 +232,9 @@ class CSPConfig:
 
     def _get_permissions_policy(self) -> str:
         permissions = [
-            "geolocation=()",
-            "microphone=()",
-            "camera=()",
+            "geolocation=(self)",
+            "microphone=(self)",
+            "camera=(self)",
             "payment=()",
             "usb=()",
             "magnetometer=()",
