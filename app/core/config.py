@@ -810,15 +810,13 @@ settings = Settings()
 
 # Version check constants can be modified later by admin.
 VERSION_CHECK_ENABLED = True
-# TODO: Change to 24 hours
-VERSION_CHECK_INTERVAL_HOURS = 1
+VERSION_CHECK_INTERVAL_HOURS = 12
 # Cache TTL: 4x the check interval (longer than check interval to ensure availability)
 # This ensures cached data is available even if checks are delayed
 VERSION_CHECK_CACHE_TTL = int(VERSION_CHECK_INTERVAL_HOURS * 4 * 3600)  # 4x interval in seconds
 
 # License refresh constants
-# TODO: Change to 8 hours
-LICENSE_REFRESH_INTERVAL_HOURS = 1
+LICENSE_REFRESH_INTERVAL_HOURS = 6
 
 # License cache constants
 # Cache TTL: 8 hours (28800 seconds)

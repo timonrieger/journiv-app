@@ -42,6 +42,9 @@ Examples:
     # 6. Resume interrupted migration
     python migrate_media_storage.py --migrate --resume
 
+    # 7. Skip thumbnail generation during migration
+    python migrate_media_storage.py --migrate --skip-thumbnails
+
 Safety:
     - Always run --dry-run first to preview changes
     - Default behavior keeps old files (non-destructive)
@@ -68,6 +71,7 @@ from app.models.entry import Entry, EntryMedia
 from app.core.config import settings
 from app.core.logging_config import log_info, log_error, log_warning
 from app.services.media_storage_service import MediaStorageService
+from app.services.media_service import MediaService
 from app.utils.import_export.media_handler import MediaHandler
 
 
@@ -81,6 +85,7 @@ class MediaMigration:
         cleanup: bool = False,
         force: bool = False,
         resume: bool = False,
+        generate_thumbnails: bool = True,
     ):
         """
         Initialize migration.
@@ -97,8 +102,10 @@ class MediaMigration:
         self.cleanup = cleanup
         self.force = force
         self.resume = resume
+        self.generate_thumbnails = generate_thumbnails
         self.storage_service = MediaStorageService(media_root)
         self.media_handler = MediaHandler()
+        self.thumbnail_service: MediaService | None = None
 
         # Migration stats
         self.stats = {
@@ -109,6 +116,8 @@ class MediaMigration:
             "errors": 0,
             "skipped": 0,
             "cleaned_up": 0,
+            "thumbnails_generated": 0,
+            "thumbnail_errors": 0,
         }
         self.errors: List[Dict[str, str]] = []
 
@@ -146,6 +155,7 @@ class MediaMigration:
         log_info("=" * 80)
         log_info(f"Starting media storage migration (dry_run={self.dry_run})")
         log_info(f"Media root: {self.media_root}")
+        log_info(f"Generate thumbnails: {self.generate_thumbnails}")
         log_info("=" * 80)
 
         # Load checkpoint if resuming
@@ -484,6 +494,11 @@ class MediaMigration:
         if self._is_new_format(media.file_path):
             log_info(f"Already migrated: {media.file_path}")
             self.stats["already_migrated"] += 1
+            if not self.dry_run:
+                self._maybe_generate_thumbnail(
+                    media,
+                    self.storage_service.get_full_path(media.file_path),
+                )
             self.processed_ids.add(str(media.id))
             return
 
@@ -543,6 +558,7 @@ class MediaMigration:
             # Update database record
             media.file_path = new_path
             media.checksum = checksum
+            self._maybe_generate_thumbnail(media, self.storage_service.get_full_path(new_path))
 
         # Update stats
         if was_deduplicated:
@@ -558,6 +574,48 @@ class MediaMigration:
             deduplicated=was_deduplicated,
             media_id=str(media.id),
         )
+
+    def _maybe_generate_thumbnail(self, media: EntryMedia, full_path: Path) -> None:
+        """Generate and persist thumbnail for migrated media when needed."""
+        if not self.generate_thumbnails:
+            return
+
+        media_type_value = media.media_type.value if hasattr(media.media_type, "value") else str(media.media_type)
+        if media_type_value not in {"image", "video"}:
+            return
+
+        if media.thumbnail_path:
+            existing_thumbnail = (self.media_root / media.thumbnail_path).resolve()
+            if existing_thumbnail.exists() and self._is_new_format(media.thumbnail_path):
+                return
+
+        try:
+            if not full_path.exists():
+                log_warning(
+                    "Media file not found for thumbnail generation",
+                    media_id=str(media.id),
+                    file_path=str(full_path),
+                )
+                return
+
+            if self.thumbnail_service is None:
+                self.thumbnail_service = MediaService()
+
+            thumbnail_path = self.thumbnail_service._generate_thumbnail(str(full_path), media.media_type)
+            if thumbnail_path:
+                media.thumbnail_path = self.thumbnail_service._relative_thumbnail_path(Path(thumbnail_path))
+                self.stats["thumbnails_generated"] += 1
+                log_info(
+                    "Generated thumbnail for migrated media",
+                    media_id=str(media.id),
+                    thumbnail_path=media.thumbnail_path,
+                )
+        except Exception as thumb_error:
+            self.stats["thumbnail_errors"] += 1
+            log_warning(
+                f"Failed to generate thumbnail for migrated media {media.id}: {thumb_error}",
+                media_id=str(media.id),
+            )
 
     def _is_new_format(self, file_path: str) -> bool:
         """
@@ -733,6 +791,9 @@ class MediaMigration:
         log_info(f"Already migrated:  {self.stats['already_migrated']}")
         log_info(f"Deduplicated:      {self.stats['deduplicated']}")
         log_info(f"Skipped:           {self.stats['skipped']}")
+        log_info(f"Thumbnails:        {self.stats['thumbnails_generated']}")
+        if self.stats["thumbnail_errors"] > 0:
+            log_info(f"Thumbnail errors:  {self.stats['thumbnail_errors']}")
         log_info(f"Errors:            {self.stats['errors']}")
         if self.cleanup:
             log_info(f"Cleaned up:        {self.stats['cleaned_up']}")
@@ -804,6 +865,11 @@ Docker Usage:
     parser.add_argument("--force", action="store_true", help="Skip confirmation prompts (for automated/Docker usage)")
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint (for interrupted migrations)")
     parser.add_argument("--media-root", type=Path, help=f"Media root directory (default: {settings.media_root})")
+    parser.add_argument(
+        "--skip-thumbnails",
+        action="store_true",
+        help="Skip thumbnail generation during migration",
+    )
 
     args = parser.parse_args()
 
@@ -838,6 +904,7 @@ Docker Usage:
         cleanup=args.cleanup,
         force=args.force,
         resume=args.resume,
+        generate_thumbnails=not args.skip_thumbnails,
     )
 
     if args.cleanup_only:

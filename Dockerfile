@@ -71,6 +71,7 @@ COPY alembic.ini .
 COPY scripts/moods.json scripts/moods.json
 COPY scripts/prompts.json scripts/prompts.json
 COPY scripts/docker-entrypoint.sh scripts/docker-entrypoint.sh
+COPY scripts/migrate_media_storage.py scripts/migrate_media_storage.py
 
 # Copy prebuilt Flutter web app
 COPY web/ web/
