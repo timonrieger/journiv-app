@@ -3,6 +3,7 @@ Import service for importing data into Journiv.
 
 Handles the business logic for importing data from various sources.
 """
+import re
 import shutil
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable
@@ -51,6 +52,63 @@ class ImportService:
         self.zip_handler = ZipHandler()
         self.media_storage_service = MediaStorageService(Path(settings.media_root), db)
         self.media_handler = MediaHandler()
+
+    @staticmethod
+    def _extract_legacy_media_id(file_path: Optional[str]) -> Optional[str]:
+        """Extract legacy media UUID from exported file paths like entry_id/media_id_filename."""
+        if not file_path:
+            return None
+
+        name = Path(file_path).name
+        if "_" in name:
+            candidate = name.split("_", 1)[0]
+            try:
+                UUID(candidate)
+                return candidate
+            except ValueError:
+                return None
+
+        # Fallback: match any UUID in the filename portion.
+        match = re.search(
+            r'([a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12})',
+            name,
+        )
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _replace_media_ids_in_content(content: str, id_map: Dict[str, str]) -> str:
+        """Replace legacy media IDs in shortcodes and URLs with new IDs."""
+        updated = content
+        for old_id, new_id in id_map.items():
+            # Shortcodes: ![[media:<id>]]
+            updated = re.sub(
+                rf'(!\[\[media:){re.escape(old_id)}(\]\])',
+                lambda match: f"{match.group(1)}{new_id}{match.group(2)}",
+                updated,
+                flags=re.IGNORECASE,
+            )
+            # API URLs: /api/v1/media/<id> (with optional /thumbnail)
+            updated = re.sub(
+                rf'(/api/v1/media/){re.escape(old_id)}(?=/|$)',
+                lambda match: f"{match.group(1)}{new_id}",
+                updated,
+                flags=re.IGNORECASE,
+            )
+            # Legacy video placeholders with file paths or old URLs.
+            updated = re.sub(
+                rf':::video\s+\S*{re.escape(old_id)}\S*\s*:::',
+                f'![[media:{new_id}]]',
+                updated,
+                flags=re.IGNORECASE,
+            )
+            # Legacy markdown images with file paths or old URLs.
+            updated = re.sub(
+                rf'!\[[^\]]*]\(\S*{re.escape(old_id)}\S*\)',
+                f'![[media:{new_id}]]',
+                updated,
+                flags=re.IGNORECASE,
+            )
+        return updated
 
     def create_import_job(
         self,
@@ -693,7 +751,9 @@ class ImportService:
 
         # Import media
         media_map = {}  # Map md5/identifier -> media_id for Day One placeholder replacement
+        legacy_media_id_map: Dict[str, str] = {}
         for media_dto in entry_dto.media:
+            legacy_media_id = self._extract_legacy_media_id(media_dto.file_path)
             media_result = self._import_media(
                 entry_id=entry.id,
                 user_id=user_id,
@@ -712,6 +772,14 @@ class ImportService:
             source_key = media_result.get("source_md5") or media_dto.external_id
             if source_key and media_result.get("media_id"):
                 media_map[source_key] = media_result["media_id"]
+            if legacy_media_id and media_result.get("media_id"):
+                legacy_media_id_map[legacy_media_id] = media_result["media_id"]
+
+        # Replace legacy Journiv media IDs in content with newly imported IDs.
+        if entry.content and legacy_media_id_map:
+            entry.content = self._replace_media_ids_in_content(entry.content, legacy_media_id_map)
+            # Recalculate word count after content update
+            entry.word_count = len(entry.content.split()) if entry.content else 0
 
         # Replace Day One photo placeholders with Journiv media shortcode format
         from app.data_transfer.dayone.richtext_parser import DayOneRichTextParser
