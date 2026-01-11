@@ -25,6 +25,12 @@ class WeatherData(BaseModel):
     """Weather data response."""
     temp_c: float = Field(..., description="Temperature in Celsius")
     temp_f: float = Field(..., description="Temperature in Fahrenheit")
+    feels_like_c: Optional[float] = Field(
+        None, description="Feels like temperature in Celsius"
+    )
+    feels_like_f: Optional[float] = Field(
+        None, description="Feels like temperature in Fahrenheit"
+    )
     condition: str = Field(..., description="Weather condition (e.g., Clear, Cloudy, Rain)")
     description: Optional[str] = Field(None, description="Detailed weather description")
     humidity: Optional[int] = Field(None, ge=0, le=100, description="Humidity percentage")
@@ -42,6 +48,8 @@ class WeatherData(BaseModel):
             "example": {
                 "temp_c": 18.5,
                 "temp_f": 65.3,
+                "feels_like_c": 17.2,
+                "feels_like_f": 63.0,
                 "condition": "Clear",
                 "description": "clear sky",
                 "humidity": 65,
@@ -66,6 +74,8 @@ class WeatherFetchResponse(BaseModel):
                 "weather": {
                     "temp_c": 18.5,
                     "temp_f": 65.3,
+                    "feels_like_c": 17.2,
+                    "feels_like_f": 63.0,
                     "condition": "Clear",
                     "description": "clear sky",
                     "humidity": 65,
