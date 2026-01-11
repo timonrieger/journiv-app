@@ -9,7 +9,7 @@ from app.core.config import settings
 # Sample Data
 SAMPLE_MSG_CURRENT = {
     "weather": [{"main": "Clear", "description": "clear sky", "icon": "01d"}],
-    "main": {"temp": 20.5, "humidity": 50, "pressure": 1013},
+    "main": {"temp": 20.5, "feels_like": 19.8, "humidity": 50, "pressure": 1013},
     "wind": {"speed": 5.0},
     "visibility": 10000,
     "dt": 1600000000
@@ -19,6 +19,7 @@ SAMPLE_MSG_TIMEMACHINE = {
     "data": [{
         "dt": 1600000000,
         "temp": 15.0,
+        "feels_like": 13.9,
         "humidity": 60,
         "pressure": 1012,
         "wind_speed": 4.0,
@@ -73,6 +74,8 @@ async def test_fetch_weather_cache_hit(mock_settings, mock_cache):
     mock_cache.get.return_value = {
         "temp_c": 20.0,
         "temp_f": 68.0,
+        "feels_like_c": 19.5,
+        "feels_like_f": 67.1,
         "condition": "Sunny",
         "description": "Sunny day",
         "humidity": 50,
@@ -102,6 +105,7 @@ async def test_fetch_current_weather_api(mock_settings, mock_cache, mock_httpx_c
 
     assert result is not None
     assert result.temp_c == 20.5
+    assert result.feels_like_c == 19.8
     assert result.condition == "Clear"
     assert provider == "openweather-current"
 
@@ -125,6 +129,7 @@ async def test_fetch_historic_weather_api(mock_settings, mock_cache, mock_httpx_
 
     assert result is not None
     assert result.temp_c == 15.0
+    assert result.feels_like_c == 13.9
     assert provider == "openweather-timemachine"
 
     # Verify Cache Set

@@ -273,10 +273,15 @@ class WeatherService:
             temp_c = entry.get("temp")
             if temp_c is None:
                 return None
+            feels_like_c = entry.get("feels_like")
 
             return WeatherData(
                 temp_c=round(temp_c, 1),
                 temp_f=round((temp_c * 9/5) + 32, 1),
+                feels_like_c=round(feels_like_c, 1) if feels_like_c is not None else None,
+                feels_like_f=(
+                    round((feels_like_c * 9/5) + 32, 1) if feels_like_c is not None else None
+                ),
                 condition=weather.get("main", "Unknown"),
                 description=weather.get("description"),
                 humidity=entry.get("humidity"),
@@ -301,10 +306,15 @@ class WeatherService:
             temp_c = main.get("temp")
             if temp_c is None:
                 return None
+            feels_like_c = main.get("feels_like")
 
             return WeatherData(
                 temp_c=round(temp_c, 1),
                 temp_f=round((temp_c * 9/5) + 32, 1),
+                feels_like_c=round(feels_like_c, 1) if feels_like_c is not None else None,
+                feels_like_f=(
+                    round((feels_like_c * 9/5) + 32, 1) if feels_like_c is not None else None
+                ),
                 condition=weather.get("main", "Unknown"),
                 description=weather.get("description"),
                 humidity=main.get("humidity"),
