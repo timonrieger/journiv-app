@@ -55,9 +55,9 @@ class VersionInfoResponse(BaseModel):
             "example": {
                 "current_version": "0.1.0-beta.9",
                 "install_id": "550e8400-e29b-41d4-a716-446655440000",
-                "latest_version": "0.1.0-beta.10",
+                "latest_version": "0.1.0-beta.11",
                 "update_available": True,
-                "update_url": "https://github.com/journiv/journiv/releases/tag/v0.1.0-beta.10",
+                "update_url": "https://github.com/journiv/journiv/releases/tag/v0.1.0-beta.11",
                 "changelog_url": "https://journiv.app/changelog",
                 "last_checked": "2025-12-09T10:30:00Z",
                 "last_check_success": True,
@@ -98,9 +98,9 @@ class ForceVersionCheckResponse(BaseModel):
                 "version_info": {
                     "current_version": "0.1.0-beta.9",
                     "install_id": "550e8400-e29b-41d4-a716-446655440000",
-                    "latest_version": "0.1.0-beta.10",
+                    "latest_version": "0.1.0-beta.11",
                     "update_available": True,
-                    "update_url": "https://github.com/journiv/journiv/releases/tag/v0.1.0-beta.10",
+                    "update_url": "https://github.com/journiv/journiv/releases/tag/v0.1.0-beta.11",
                     "changelog_url": "https://journiv.app/changelog",
                     "last_checked": "2025-12-09T10:30:00Z",
                     "last_check_success": True,
