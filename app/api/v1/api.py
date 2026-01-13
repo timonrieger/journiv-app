@@ -4,7 +4,8 @@ API v1 router.
 from fastapi import APIRouter
 from app.api.v1.endpoints import (
     auth, users, journals, entries, moods, prompts, tags,
-    analytics, media, health, security, oidc, admin, version, license, location, weather
+    analytics, media, health, security, oidc, admin, version, license, location, weather,
+    instance_config
 )
 # Import/Export routers
 from app.api.v1.endpoints.export_data import router as export_router
@@ -28,6 +29,7 @@ api_router.include_router(import_router)
 api_router.include_router(health.router)
 api_router.include_router(security.router)
 api_router.include_router(version.router)
+api_router.include_router(instance_config.router)
 api_router.include_router(admin.router)
 api_router.include_router(license.router)
 api_router.include_router(location.router)
