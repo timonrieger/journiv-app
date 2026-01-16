@@ -10,6 +10,7 @@ from app.api.v1.endpoints import (
 # Import/Export routers
 from app.api.v1.endpoints.export_data import router as export_router
 from app.api.v1.endpoints.import_data import router as import_router
+from app.integrations import router as integrations
 
 api_router = APIRouter()
 
@@ -34,3 +35,4 @@ api_router.include_router(admin.router)
 api_router.include_router(license.router)
 api_router.include_router(location.router)
 api_router.include_router(weather.router)
+api_router.include_router(integrations.router)

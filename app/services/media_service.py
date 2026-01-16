@@ -2,7 +2,6 @@
 Media service for file upload and processing.
 """
 import asyncio
-import hashlib
 import logging
 import subprocess
 import uuid
@@ -11,8 +10,6 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
-import aiofiles
-import aiofiles.os
 import magic
 from fastapi import UploadFile
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -124,7 +121,12 @@ class MediaService:
         else:
             return self.media_root / filename
 
-    def _get_thumbnail_path(self, filename: str, media_type: Optional[MediaType | str] = None) -> Optional[Path]:
+    def _get_thumbnail_path(
+        self,
+        filename: str,
+        media_type: Optional[MediaType | str] = None,
+        user_id: Optional[str] = None
+    ) -> Optional[Path]:
         """Get the thumbnail path for a media file in standardized format.
 
         Returns None for media types that cannot generate thumbnails.
@@ -133,6 +135,18 @@ class MediaService:
             return None
 
         media_type_lower = self._normalize_media_type(media_type)
+        if user_id:
+            if '/' in user_id or '\\' in user_id or '..' in user_id:
+                raise ValueError("user_id contains invalid path characters")
+            if media_type_lower == "image":
+                return self.media_root / user_id / "images" / "thumbnails" / filename
+            elif media_type_lower == "video":
+                return self.media_root / user_id / "videos" / "thumbnails" / filename
+            elif media_type_lower == "audio":
+                return self.media_root / user_id / "audio" / "thumbnails" / filename
+            else:
+                return None
+
         if media_type_lower == "image":
             return self.media_root / "images" / "thumbnails" / filename
         elif media_type_lower == "video":
@@ -163,23 +177,28 @@ class MediaService:
 
     async def save_uploaded_file(
         self,
-        file_content: bytes,
         original_filename: str,
         user_id: str,
-        media_type: MediaType
+        media_type: MediaType,
+        file_content: Optional[bytes] = None,
+        file_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Save an uploaded file using unified MediaStorageService.
 
         Args:
-            file_content: File content as bytes
             original_filename: Original filename from upload
             user_id: User UUID string
             media_type: MediaType enum
+            file_content: File content as bytes (optional)
+            file_path: Path to file on disk (optional, for large files)
 
         Returns:
             Dict with file metadata
         """
+        if not file_content and not file_path:
+            raise ValueError("Either file_content or file_path must be provided")
+
         # Determine media type directory
         media_type_lower = self._normalize_media_type(media_type)
         if media_type_lower == "image":
@@ -197,38 +216,55 @@ class MediaService:
         safe_original = MediaHandler.sanitize_filename(original_filename)
         extension = Path(safe_original).suffix or ".bin"
 
-        # Create BytesIO stream from content
-        file_stream = BytesIO(file_content)
+        # Prepare source stream
+        source_stream = None
+        should_close_stream = False
 
-        # Store using unified storage service (per-user deduplication)
-        # Run synchronously - file I/O is blocking anyway
-        relative_path, checksum, was_deduplicated = await asyncio.to_thread(
-            self.media_storage_service.store_media,
-            source=file_stream,
-            user_id=user_id,
-            media_type=media_type_dir,
-            extension=extension,
-            checksum=None  # Will be calculated
-        )
+        try:
+            if file_path:
+                file_obj = Path(file_path)
+                if not file_obj.exists():
+                    raise ValueError(f"File not found: {file_path}")
+                file_size = file_obj.stat().st_size
+                source_stream = file_obj.open('rb')
+                should_close_stream = True
+                header = source_stream.read(2048)
+                source_stream.seek(0)
+                mime_type = self._detect_mime(header)
+            else:
+                source_stream = BytesIO(file_content)
+                file_size = len(file_content)
+                mime_type = self._detect_mime(file_content)
 
-        # Get metadata
-        file_size = len(file_content)
-        mime_type = self._detect_mime(file_content)
-        full_file_path = self.media_storage_service.get_full_path(relative_path)
+            # Store using storage service (per-user deduplication)
+            # Run synchronously - file I/O is blocking anyway
+            relative_path, checksum, was_deduplicated = await asyncio.to_thread(
+                self.media_storage_service.store_media,
+                source=source_stream,
+                user_id=user_id,
+                media_type=media_type_dir,
+                extension=extension,
+                checksum=None  # Will be calculated
+            )
 
-        return {
-            "filename": Path(relative_path).name,
-            "file_path": relative_path,
-            "original_filename": safe_original,
-            "file_size": file_size,
-            "mime_type": mime_type,
-            "thumbnail_path": None,  # Will be generated in background
-            "media_type": media_type,
-            "upload_status": UploadStatus.PENDING,
-            "checksum": checksum,
-            "full_file_path": str(full_file_path),  # For background processing
-            "was_deduplicated": was_deduplicated
-        }
+            full_file_path = self.media_storage_service.get_full_path(relative_path)
+
+            return {
+                "filename": Path(relative_path).name,
+                "file_path": relative_path,
+                "original_filename": safe_original,
+                "file_size": file_size,
+                "mime_type": mime_type,
+                "thumbnail_path": None,  # Will be generated in background
+                "media_type": media_type,
+                "upload_status": UploadStatus.PENDING,
+                "checksum": checksum,
+                "full_file_path": str(full_file_path),  # For background processing
+                "was_deduplicated": was_deduplicated
+            }
+        finally:
+            if should_close_stream and source_stream:
+                source_stream.close()
 
     async def get_media_info(self, file_path: str) -> Dict[str, Any]:
         """Get detailed information about a media file."""
@@ -476,10 +512,10 @@ class MediaService:
 
         # 6. Save file
         media_info = await self.save_uploaded_file(
-            file_content,
-            file.filename or "unknown",
-            str(user_id),
-            media_type
+            original_filename=file.filename or "unknown",
+            user_id=str(user_id),
+            media_type=media_type,
+            file_content=file_content
         )
 
         media_record = None
@@ -659,6 +695,7 @@ class MediaService:
             raise MediaNotFoundError("Media not found")
         return media
 
+
     def process_uploaded_file(self, media_id: str, file_path: str, user_id: str) -> None:
         """
         Process uploaded media file with metadata extraction and thumbnail generation.
@@ -716,14 +753,26 @@ class MediaService:
             thumbnail_path = None
             media_type_value = metadata.get('media_type')
             try:
-                media_type_enum = MediaType(media_type_value)
-                if media_type_enum in {MediaType.IMAGE, MediaType.VIDEO}:
+                has_existing_thumbnail = False
+                if media.thumbnail_path:
+                    full_thumbnail_path = (self.media_root / media.thumbnail_path).resolve()
                     try:
-                        thumbnail_path = self._generate_thumbnail(str(actual_file_path), media_type_enum)
-                    except Exception as e:
-                        log_warning(f"Thumbnail generation failed for {media_id}: {e}",
-                                  media_id=media_id, user_id=user_id)
-                        # Continue without thumbnail - not critical
+                        full_thumbnail_path.relative_to(self.media_root.resolve())
+                        if full_thumbnail_path.exists():
+                            has_existing_thumbnail = True
+                    except ValueError:
+                        # Path is not within media_root
+                        pass
+
+                if not has_existing_thumbnail:
+                    media_type_enum = MediaType(media_type_value)
+                    if media_type_enum in {MediaType.IMAGE, MediaType.VIDEO}:
+                        try:
+                            thumbnail_path = self._generate_thumbnail(str(actual_file_path), media_type_enum)
+                        except Exception as e:
+                            log_warning(f"Thumbnail generation failed for {media_id}: {e}",
+                                      media_id=media_id, user_id=user_id)
+                            # Continue without thumbnail - not critical
             except Exception:
                 # Invalid media type - skip thumbnail generation
                 pass
@@ -905,12 +954,17 @@ class MediaService:
             thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
 
             cmd = [
-                "ffmpeg", "-i", str(video_path),
-                "-ss", self.VIDEO_THUMBNAIL_SEEK_TIME,
+                "ffmpeg",
+                "-threads", "1",           # Use single thread to minimize memory usage
+                "-hide_banner",            # Suppress banner
+                "-loglevel", "error",      # Suppress warnings
+                "-nostats",                # Suppress stats
+                "-ss", self.VIDEO_THUMBNAIL_SEEK_TIME, # Seek BEFORE input (fast seek / input seeking)
+                "-i", str(video_path),
                 "-vframes", "1",
                 "-vf", f"scale={self.THUMBNAIL_SIZE[0]}:{self.THUMBNAIL_SIZE[1]}",
-                "-f", "image2",  # Force image output format
-                "-y",  # Overwrite output
+                "-f", "image2",
+                "-y",
                 str(thumbnail_path)
             ]
 
@@ -919,7 +973,9 @@ class MediaService:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
             if result.returncode != 0:
-                log_error(f"FFmpeg failed: {result.stderr}")
+                # If we still fail, log the stderr but truncate if too long
+                err_msg = result.stderr[:1000] + "..." if len(result.stderr) > 1000 else result.stderr
+                log_error(f"FFmpeg failed: {err_msg}")
                 raise Exception(f"FFmpeg failed with return code {result.returncode}")
 
         except subprocess.TimeoutExpired:

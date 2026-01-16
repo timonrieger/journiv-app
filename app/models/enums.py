@@ -111,6 +111,7 @@ class JobStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
+    PARTIAL = "partial"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
@@ -120,10 +121,10 @@ class ImportSourceType(str, Enum):
     JOURNIV = "journiv"
     MARKDOWN = "markdown"
     DAYONE = "dayone"
+    IMMICH = "immich"
 
 
 class ExportType(str, Enum):
     """Types of exports."""
     FULL = "full"  # Full user export
     JOURNAL = "journal"  # Single journal export
-

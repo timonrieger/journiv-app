@@ -21,6 +21,7 @@ except ImportError:  # pragma: no cover - fallback for older Alembic
 from alembic.autogenerate import renderers
 from app.core.config import settings
 from app.models import *  # noqa: F401,F403  (needed for metadata discovery)
+from app.models.integration import *  # noqa: F401,F403  (integration models)
 from sqlmodel import SQLModel
 from sqlmodel.sql.sqltypes import AutoString
 

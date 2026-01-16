@@ -7,6 +7,7 @@ from .entry_tag_link import EntryTagLink
 from .export_job import ExportJob
 from .external_identity import ExternalIdentity
 from .import_job import ImportJob
+from .integration import Integration
 from .journal import Journal
 from .mood import Mood, MoodLog
 from .prompt import Prompt
@@ -30,4 +31,5 @@ __all__ = [
     "ImportJob",
     "ExportJob",
     "InstanceDetail",
+    "Integration",
 ]

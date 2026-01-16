@@ -70,10 +70,10 @@ async def get_user_mood_logs(
     session: Annotated[Session, Depends(get_session)],
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    mood_id: Optional[uuid.UUID] = Query(None),
-    entry_id: Optional[uuid.UUID] = Query(None),
-    start_date: Optional[date] = Query(None),
-    end_date: Optional[date] = Query(None)
+    mood_id: Optional[str] = Query(None),
+    entry_id: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None)
 ):
     """
     Get mood logs for the current user with optional filters.
@@ -82,10 +82,53 @@ async def get_user_mood_logs(
     """
     mood_service = MoodService(session)
     try:
+        # Parse optional parameters that might be sent as empty strings
+        parsed_mood_id: Optional[uuid.UUID] = None
+        if mood_id and mood_id.strip():
+            try:
+                parsed_mood_id = uuid.UUID(mood_id)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid mood_id format"
+                )
+
+        parsed_entry_id: Optional[uuid.UUID] = None
+        if entry_id and entry_id.strip():
+            try:
+                parsed_entry_id = uuid.UUID(entry_id)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid entry_id format"
+                )
+
+        parsed_start_date: Optional[date] = None
+        if start_date and start_date.strip():
+            try:
+                parsed_start_date = date.fromisoformat(start_date)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid start_date format (YYYY-MM-DD)"
+                )
+
+        parsed_end_date: Optional[date] = None
+        if end_date and end_date.strip():
+            try:
+                parsed_end_date = date.fromisoformat(end_date)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid end_date format (YYYY-MM-DD)"
+                )
+
         mood_logs = mood_service.get_user_mood_logs(
-            current_user.id, limit, offset, mood_id, entry_id, start_date, end_date
+            current_user.id, limit, offset, parsed_mood_id, parsed_entry_id, parsed_start_date, parsed_end_date
         )
         return mood_logs
+    except HTTPException:
+        raise
     except Exception as e:
         log_error(e, request_id="", user_email=current_user.email)
         raise HTTPException(
