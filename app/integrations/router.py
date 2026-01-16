@@ -24,7 +24,7 @@ from sqlmodel import Session, select
 
 from app.api.dependencies import get_current_user
 from app.core.database import get_session
-from app.models.integration import IntegrationProvider
+from app.models.integration import Integration, IntegrationProvider  # Needed for proxy queries below.
 from app.integrations.schemas import (
     IntegrationConnectRequest,
     IntegrationConnectResponse,

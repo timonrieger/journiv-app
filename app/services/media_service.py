@@ -1085,6 +1085,9 @@ class MediaService:
         Raises:
             MediaNotFoundError: If file doesn't exist
         """
+        if not media.file_path:
+            raise MediaNotFoundError("Media file not available")
+
         root = self.media_root.resolve()
         full_path = (root / media.file_path).resolve()
 
