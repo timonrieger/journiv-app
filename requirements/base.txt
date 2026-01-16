@@ -7,7 +7,9 @@ pydantic==2.12.5
 sqlmodel==0.0.31
 sqlalchemy==2.0.45
 alembic==1.17.2
+aiosqlite==0.22.1
 psycopg2-binary==2.9.11
+asyncpg==0.31.0
 
 # Authentication
 python-jose[cryptography]==3.5.0

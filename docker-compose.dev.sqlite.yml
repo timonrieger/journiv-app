@@ -20,6 +20,9 @@ x-dev-common: &dev-common
   depends_on:
     valkey:
       condition: service_healthy
+  environment:
+    DB_DRIVER: sqlite
+    DATABASE_URL: sqlite:////data/journiv.db
 
 x-celery-healthcheck: &celery-healthcheck
   interval: 30s

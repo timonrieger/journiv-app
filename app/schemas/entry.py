@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, date
 from typing import Optional, Dict, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field, model_validator
 
 from app.schemas.base import TimestampMixin
 
@@ -89,9 +89,9 @@ from app.models.enums import MediaType, UploadStatus
 class EntryMediaBase(BaseModel):
     """Base entry media schema."""
     media_type: MediaType
-    file_path: str
+    file_path: Optional[str] = None
     original_filename: Optional[str] = None
-    file_size: int
+    file_size: Optional[int] = None
     mime_type: str
     thumbnail_path: Optional[str] = None
     duration: Optional[int] = None
@@ -100,6 +100,19 @@ class EntryMediaBase(BaseModel):
     alt_text: Optional[str] = None
     upload_status: UploadStatus = UploadStatus.PENDING
     file_metadata: Optional[str] = None
+
+    # External provider fields
+    external_provider: Optional[str] = None
+    external_asset_id: Optional[str] = None
+    external_url: Optional[str] = None
+    external_created_at: Optional[datetime] = None
+    external_metadata: Optional[Dict[str, Any]] = None
+
+    @computed_field
+    @property
+    def is_external(self) -> bool:
+        """Check if this media is linked from an external provider."""
+        return self.external_provider is not None
 
 
 class EntryMediaCreate(EntryMediaBase):
@@ -125,3 +138,21 @@ class EntryMediaResponse(EntryMediaBase, TimestampMixin):
         if 'upload_status' in data and hasattr(data['upload_status'], 'value'):
             data['upload_status'] = data['upload_status'].value
         return data
+
+    @model_validator(mode='after')
+    def validate_source_presence(self):
+        """Ensure media has either local or external source."""
+        if self.upload_status in {UploadStatus.PENDING, UploadStatus.FAILED}:
+            return self
+        # Check local source
+        has_local = self.file_path is not None and self.file_size is not None
+
+        # Check external source
+        has_external = self.external_provider is not None and (
+            self.external_asset_id is not None or self.external_url is not None
+        )
+
+        if not (has_local or has_external):
+            raise ValueError("Media must have either a local file or an external source")
+
+        return self

@@ -12,6 +12,7 @@ from sqlmodel import Field, Relationship, Index, CheckConstraint, String
 from .base import BaseModel, TimestampMixin
 from .enums import Theme, UserRole
 
+
 if TYPE_CHECKING:
     from .journal import Journal
     from .prompt import Prompt
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from .analytics import WritingStreak
     from .external_identity import ExternalIdentity
     from .entry import Entry
+    from app.models.integration import Integration
 
 
 class User(BaseModel, table=True):
@@ -83,6 +85,10 @@ class User(BaseModel, table=True):
         sa_relationship_kwargs={"cascade": "all, delete-orphan"}
     )
     entries: List["Entry"] = Relationship(
+        back_populates="user",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+    )
+    integrations: List["Integration"] = Relationship(
         back_populates="user",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"}
     )

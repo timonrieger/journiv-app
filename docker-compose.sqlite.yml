@@ -19,6 +19,9 @@ x-celery-common: &celery-common
   env_file: .env
   volumes:
     - app_data:/data
+  environment:
+    DB_DRIVER: sqlite
+    DATABASE_URL: sqlite:////data/journiv.db
   depends_on:
     valkey:
       condition: service_healthy
@@ -43,6 +46,9 @@ x-app-common: &app-common
   env_file: .env
   volumes:
     - app_data:/data
+  environment:
+    DB_DRIVER: sqlite
+    DATABASE_URL: sqlite:////data/journiv.db
   depends_on:
     valkey:
       condition: service_healthy

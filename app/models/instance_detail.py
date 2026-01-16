@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from pydantic import field_validator
-from sqlalchemy import Column, DateTime
+from sqlalchemy import Column, DateTime, UniqueConstraint
 from sqlmodel import Field
 
 from .base import BaseModel
@@ -36,6 +36,9 @@ class InstanceDetail(BaseModel, table=True):
     """
 
     __tablename__ = "instance_details"
+    __table_args__ = (
+        UniqueConstraint('singleton_marker', name='uq_instance_details_singleton'),
+    )
 
     # Hardware-bound installation identifier (PRIMARY EXTERNAL ID)
     # This is the ONLY ID that should be exposed outside the database layer

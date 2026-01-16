@@ -2,8 +2,8 @@
 Entry-related models.
 """
 import uuid
-from datetime import date, datetime
-from typing import List, Optional, TYPE_CHECKING
+from datetime import date, datetime, timezone
+from typing import List, Optional, TYPE_CHECKING, Dict, Any
 
 from pydantic import field_validator, model_validator
 from sqlalchemy import Column, ForeignKey, Enum as SAEnum, UniqueConstraint, String, DateTime, Float
@@ -185,6 +185,9 @@ class Entry(BaseModel, table=True):
 class EntryMedia(BaseModel, table=True):
     """
     Media files associated with journal entries.
+
+    Supports both local files (stored on Journiv server) and external links
+    (referenced from external providers like Immich).
     """
     __tablename__ = "entry_media"
 
@@ -200,11 +203,15 @@ class EntryMedia(BaseModel, table=True):
             nullable=False
         )
     )
-    file_path: str = Field(..., max_length=500)
-    original_filename: Optional[str] = Field(None, max_length=255)
-    file_size: int = Field(..., gt=0)
-    mime_type: str = Field(..., max_length=100)
+
+    # Local file fields (nullable for external media)
+    file_path: Optional[str] = Field(None, max_length=500)
+    file_size: Optional[int] = Field(None, gt=0)
     thumbnail_path: Optional[str] = Field(None, max_length=500)
+
+    # Common fields
+    original_filename: Optional[str] = Field(None, max_length=255)
+    mime_type: str = Field(..., max_length=100)
     duration: Optional[int] = Field(None, ge=0)  # in seconds for video/audio
     width: Optional[int] = Field(None, ge=0)
     height: Optional[int] = Field(None, ge=0)
@@ -224,6 +231,33 @@ class EntryMedia(BaseModel, table=True):
         sa_column=Column(String(64), nullable=True)
     )
 
+    # External provider fields (for link-only media)
+    external_provider: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(50), nullable=True, index=True),
+        description="External provider name (e.g., 'immich', 'jellyfin')"
+    )
+    external_asset_id: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(255), nullable=True, index=True),
+        description="Asset ID in the external provider's system"
+    )
+    external_url: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(512), nullable=True),
+        description="Full URL to the asset in the external provider"
+    )
+    external_created_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+        description="Creation date from external provider (e.g., photo taken_at)"
+    )
+    external_metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        sa_column=SQLModelColumn(JSONType(), nullable=True),
+        description="Additional metadata from external provider (JSON)"
+    )
+
     # Relations
     entry: "Entry" = Relationship(back_populates="media")
 
@@ -234,13 +268,24 @@ class EntryMedia(BaseModel, table=True):
         Index('idx_entry_media_type', 'media_type'),
         Index('idx_entry_media_status', 'upload_status'),
         Index('idx_entry_media_checksum', 'checksum'),
+        Index('idx_entry_media_external_provider', 'external_provider', 'external_asset_id'),
         UniqueConstraint('entry_id', 'checksum', name='uq_entry_media_entry_checksum'),
         # Constraints
-        CheckConstraint('file_size > 0', name='check_file_size_positive'),
+        # Either local file (file_path + file_size) OR external link (external_provider)
+        CheckConstraint(
+            '(file_path IS NOT NULL AND file_size > 0) OR (external_provider IS NOT NULL)',
+            name='check_media_source'
+        ),
+        CheckConstraint('file_size IS NULL OR file_size > 0', name='check_file_size_positive'),
         CheckConstraint('duration IS NULL OR duration >= 0', name='check_duration_non_negative'),
         CheckConstraint('width IS NULL OR width > 0', name='check_width_positive'),
         CheckConstraint('height IS NULL OR height > 0', name='check_height_positive'),
     )
+
+    @property
+    def is_external(self) -> bool:
+        """Check if this media is linked from an external provider."""
+        return self.external_provider is not None
 
     @field_validator('media_type')
     @classmethod
@@ -263,3 +308,12 @@ class EntryMedia(BaseModel, table=True):
         except ValueError as exc:
             allowed_statuses = sorted(status.value for status in UploadStatus)
             raise ValueError(f'Invalid upload_status: {v}. Must be one of {allowed_statuses}') from exc
+
+    @field_validator('external_created_at')
+    @classmethod
+    def validate_external_created_at(cls, v):
+        if v is None:
+            return v
+        if v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v

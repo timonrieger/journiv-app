@@ -490,7 +490,12 @@ class EntryService:
             alt_text=media_data.alt_text,
             upload_status=media_data.upload_status,
             file_metadata=media_data.file_metadata,
-            checksum=media_data.checksum
+            checksum=media_data.checksum,
+            external_provider=media_data.external_provider,
+            external_asset_id=media_data.external_asset_id,
+            external_url=media_data.external_url,
+            external_created_at=media_data.external_created_at,
+            external_metadata=media_data.external_metadata,
         )
 
         try:

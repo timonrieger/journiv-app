@@ -148,6 +148,7 @@ class JournalService:
         self.session.delete(journal)
 
         try:
+            # Commit all deletions
             self.session.commit()
         except SQLAlchemyError as exc:
             self.session.rollback()
@@ -191,7 +192,6 @@ class JournalService:
 
         log_info(f"Journal and related entries/media hard-deleted for {user_id}: {journal_id}")
         return True
-
     def get_favorite_journals(self, user_id: uuid.UUID) -> List[Journal]:
         """Get favorite journals for a user."""
         statement = select(Journal).where(

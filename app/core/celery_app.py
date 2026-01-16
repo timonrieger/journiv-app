@@ -14,6 +14,9 @@ celery_app = Celery(
         "app.tasks.export_tasks",
         "app.tasks.version_check",
         "app.tasks.license_refresh",
+        "app.tasks.immich_import_tasks",
+        "app.tasks.media_processing_tasks",
+        "app.integrations.tasks",
     ],
 )
 
@@ -34,7 +37,11 @@ celery_app.conf.update(
         "refresh-license-interval": {
             "task": "app.tasks.license_refresh.refresh_license",
             "schedule": timedelta(hours=LICENSE_REFRESH_INTERVAL_HOURS),
-        }
+        },
+        "sync-integrations-interval": {
+            "task": "app.integrations.tasks.sync_all_providers_task",
+            "schedule": timedelta(hours=settings.integration_sync_interval_hours),
+        },
     },
     task_track_started=True,
     task_time_limit=3600,  # 1 hour hard limit for tasks
@@ -47,7 +54,7 @@ celery_app.conf.update(
 )
 
 # Auto-discover tasks from app.tasks module
-celery_app.autodiscover_tasks(["app.tasks"])
+celery_app.autodiscover_tasks(["app.tasks", "app.integrations"])
 
 
 def get_celery_app() -> Celery:

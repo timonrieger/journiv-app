@@ -105,6 +105,16 @@ class Settings(BaseSettings):
     import_temp_dir: str = "/data/imports/temp"
     export_dir: str = "/data/exports"
 
+    # Integrations Configuration
+    # Base URLs for family-shared self-hosted services (optional defaults)
+    immich_base_url: Optional[str] = None  # e.g., "https://photos.family.lan"
+    jellyfin_base_url: Optional[str] = None  # e.g., "https://media.family.lan"
+    audiobookshelf_base_url: Optional[str] = None  # e.g., "https://books.family.lan"
+
+    # Integration sync settings
+    integration_sync_interval_hours: int = 6  # How often to sync integrations
+    integration_cache_limit: int = 1000  # Max cached items per user per integration
+
     # CSP Configuration
     enable_csp: bool = True
     enable_hsts: bool = True
