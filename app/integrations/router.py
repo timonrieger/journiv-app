@@ -47,12 +47,28 @@ import httpx
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
 
-async def _close_httpx_stream(response: httpx.Response, client: httpx.AsyncClient) -> None:
+_proxy_client: Optional[httpx.AsyncClient] = None
+_proxy_timeout = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
+_proxy_limits = httpx.Limits(max_connections=50, max_keepalive_connections=20)
+
+
+def _get_proxy_client() -> httpx.AsyncClient:
+    """Reuse a single client to avoid connection churn under thumbnail bursts."""
+    global _proxy_client
+    if _proxy_client is None:
+        _proxy_client = httpx.AsyncClient(
+            verify=True,
+            follow_redirects=True,
+            timeout=_proxy_timeout,
+            limits=_proxy_limits,
+            transport=httpx.AsyncHTTPTransport(retries=2),
+        )
+    return _proxy_client
+
+
+async def _close_httpx_stream(response: httpx.Response) -> None:
     """Ensure streamed HTTP responses release network resources."""
-    try:
-        await response.aclose()
-    finally:
-        await client.aclose()
+    await response.aclose()
 
 
 @router.post(
@@ -415,7 +431,7 @@ async def proxy_thumbnail(
                 detail=f"Thumbnail proxy not implemented for {provider}"
             )
 
-        client = httpx.AsyncClient(verify=True, follow_redirects=True, timeout=30.0)
+        client = _get_proxy_client()
         try:
             request = client.build_request(
                 "GET",
@@ -424,7 +440,6 @@ async def proxy_thumbnail(
             )
             response = await client.send(request, stream=True)
         except Exception:
-            await client.aclose()
             raise
 
         # Handle provider errors
@@ -434,14 +449,14 @@ async def proxy_thumbnail(
             integration.last_error_at = datetime.now(timezone.utc)
             session.add(integration)
             session.commit()
-            await _close_httpx_stream(response, client)
+            await _close_httpx_stream(response)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"{provider} authentication failed. Please reconnect your integration."
             )
 
         if response.status_code == 404:
-            await _close_httpx_stream(response, client)
+            await _close_httpx_stream(response)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Asset {asset_id} not found in {provider}"
@@ -450,7 +465,7 @@ async def proxy_thumbnail(
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            await _close_httpx_stream(response, client)
+            await _close_httpx_stream(response)
             detail = f"{provider} provider error"
             raise HTTPException(
                 status_code=e.response.status_code,
@@ -465,7 +480,7 @@ async def proxy_thumbnail(
                 "Cache-Control": "public, max-age=3600",
                 "X-Provider": provider.value
             },
-            background=BackgroundTask(_close_httpx_stream, response, client)
+            background=BackgroundTask(_close_httpx_stream, response)
         )
 
     except HTTPException:
@@ -549,7 +564,7 @@ async def proxy_original(
         if range_header:
             headers["Range"] = range_header
 
-        client = httpx.AsyncClient(verify=True, follow_redirects=True, timeout=60.0)
+        client = _get_proxy_client()
         try:
             proxied_request = client.build_request(
                 "GET",
@@ -558,7 +573,6 @@ async def proxy_original(
             )
             response = await client.send(proxied_request, stream=True)
         except Exception:
-            await client.aclose()
             raise
 
         # Handle provider errors
@@ -568,21 +582,21 @@ async def proxy_original(
             integration.last_error_at = datetime.now(timezone.utc)
             session.add(integration)
             session.commit()
-            await _close_httpx_stream(response, client)
+            await _close_httpx_stream(response)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"{provider} authentication failed. Please reconnect your integration."
             )
 
         if response.status_code == 404:
-            await _close_httpx_stream(response, client)
+            await _close_httpx_stream(response)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Asset {asset_id} not found in {provider}"
             )
 
         if response.status_code == 416:
-            await _close_httpx_stream(response, client)
+            await _close_httpx_stream(response)
             raise HTTPException(
                 status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
                 detail="Range Not Satisfiable"
@@ -591,7 +605,7 @@ async def proxy_original(
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            await _close_httpx_stream(response, client)
+            await _close_httpx_stream(response)
             raise HTTPException(
                 status_code=e.response.status_code,
                 detail=f"{provider} provider error"
@@ -620,7 +634,7 @@ async def proxy_original(
             status_code=status_code,
             media_type=response.headers.get("content-type", "application/octet-stream"),
             headers=response_headers,
-            background=BackgroundTask(_close_httpx_stream, response, client)
+            background=BackgroundTask(_close_httpx_stream, response)
         )
 
     except HTTPException:

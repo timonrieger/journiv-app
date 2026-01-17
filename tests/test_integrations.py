@@ -10,6 +10,8 @@ import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 from app.models.integration import Integration, IntegrationProvider
 from app.integrations.schemas import IntegrationConnectRequest, IntegrationStatusResponse
 
@@ -201,6 +203,31 @@ class TestIntegrationEndpoints:
 
         assert status_route is not None
         assert "GET" in status_route.methods
+
+    @pytest.mark.asyncio
+    async def test_proxy_client_is_singleton(self):
+        """Test that the proxy client is reused across calls."""
+        from app.integrations import router as integrations_router
+
+        integrations_router._proxy_client = None
+        client_first = integrations_router._get_proxy_client()
+        client_second = integrations_router._get_proxy_client()
+
+        assert isinstance(client_first, httpx.AsyncClient)
+        assert client_first is client_second
+
+    @pytest.mark.asyncio
+    async def test_close_httpx_stream_only_closes_response(self):
+        """Test that closing the stream does not require a client close."""
+        from app.integrations import router as integrations_router
+
+        request = httpx.Request("GET", "https://example.com")
+        response = httpx.Response(200, request=request)
+        response.aclose = AsyncMock()
+
+        await integrations_router._close_httpx_stream(response)
+
+        response.aclose.assert_awaited_once()
 
 
 # ================================================================================

@@ -9,6 +9,7 @@ import httpx
 from app.schemas.weather import WeatherData
 from app.core.config import settings
 from app.core.logging_config import log_debug, log_info, log_warning, log_error
+from app.core.http_client import get_http_client
 from app.core.scoped_cache import ScopedCache
 from app.core.time_utils import ensure_utc, utc_now
 
@@ -235,10 +236,10 @@ class WeatherService:
             "appid": api_key,
             "units": "metric",
         }
-        async with httpx.AsyncClient(timeout=cls.TIMEOUT) as client:
-            resp = await client.get(cls.OPENWEATHER_TIMEMACHINE_URL, params=params)
-            resp.raise_for_status()
-            return cls._parse_timemachine_response(resp.json())
+        client = await get_http_client()
+        resp = await client.get(cls.OPENWEATHER_TIMEMACHINE_URL, params=params, timeout=cls.TIMEOUT)
+        resp.raise_for_status()
+        return cls._parse_timemachine_response(resp.json())
 
     @classmethod
     async def _fetch_current_weather(
@@ -253,10 +254,10 @@ class WeatherService:
             "appid": api_key,
             "units": "metric",
         }
-        async with httpx.AsyncClient(timeout=cls.TIMEOUT) as client:
-            resp = await client.get(cls.OPENWEATHER_CURRENT_URL, params=params)
-            resp.raise_for_status()
-            return cls._parse_current_response(resp.json())
+        client = await get_http_client()
+        resp = await client.get(cls.OPENWEATHER_CURRENT_URL, params=params, timeout=cls.TIMEOUT)
+        resp.raise_for_status()
+        return cls._parse_current_response(resp.json())
 
     @staticmethod
     def _parse_timemachine_response(data: dict) -> Optional[WeatherData]:

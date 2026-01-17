@@ -24,6 +24,7 @@ from app.services.entry_service import EntryService
 from app.services.media_service import MediaService
 
 from app.core.logging_config import log_info, log_error, log_warning
+from app.core.http_client import get_http_client
 
 # Batch size for parallel downloads (configurable in future)
 COPY_MODE_BATCH_SIZE = 3
@@ -314,30 +315,30 @@ class ImportJobService:
         """
         for attempt in range(max_retries + 1):
             try:
-                async with httpx.AsyncClient(verify=True, timeout=timeout) as client:
-                    if method == "GET":
-                        response = await client.get(url, headers=headers)
-                    elif method == "POST":
-                        response = await client.post(url, headers=headers, json=json_data)
-                    else:
-                        raise ValueError(f"Unsupported method: {method}")
+                client = await get_http_client()
+                if method == "GET":
+                    response = await client.get(url, headers=headers, timeout=timeout)
+                elif method == "POST":
+                    response = await client.post(url, headers=headers, json=json_data, timeout=timeout)
+                else:
+                    raise ValueError(f"Unsupported method: {method}")
 
-                    if response.status_code in (401, 403):
-                        log_error(f"Authentication failed for {url}: {response.status_code}")
-                        return response
-
-                    if response.status_code == 404:
-                        return response
-
-                    # Retry on transient errors (5xx)
-                    if response.status_code >= 500 and attempt < max_retries:
-                        wait_time = 2 ** attempt
-                        log_warning(f"Retry {attempt + 1}/{max_retries} for {url} after {wait_time}s (server error {response.status_code})")
-                        await asyncio.sleep(wait_time)
-                        continue
-
-                    response.raise_for_status()
+                if response.status_code in (401, 403):
+                    log_error(f"Authentication failed for {url}: {response.status_code}")
                     return response
+
+                if response.status_code == 404:
+                    return response
+
+                # Retry on transient errors (5xx)
+                if response.status_code >= 500 and attempt < max_retries:
+                    wait_time = 2 ** attempt
+                    log_warning(f"Retry {attempt + 1}/{max_retries} for {url} after {wait_time}s (server error {response.status_code})")
+                    await asyncio.sleep(wait_time)
+                    continue
+
+                response.raise_for_status()
+                return response
 
             except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
                 if attempt < max_retries:
@@ -862,8 +863,13 @@ class ImportJobService:
             temp_file_path = None
 
             try:
-                async with httpx.AsyncClient(verify=True, timeout=120.0) as client:
-                    async with client.stream("GET", f"{base_url}/api/assets/{asset_id}/original", headers={"x-api-key": api_key}) as response:
+                client = await get_http_client()
+                async with client.stream(
+                    "GET",
+                    f"{base_url}/api/assets/{asset_id}/original",
+                    headers={"x-api-key": api_key},
+                    timeout=120.0,
+                ) as response:
                         if response.status_code != 200:
                             log_warning(f"Failed to download original for asset {asset_id}: {response.status_code}")
                             return None

@@ -9,6 +9,7 @@ import httpx
 from app.schemas.location import LocationResult
 from app.core.logging_config import log_debug, log_info, log_warning, log_error
 from app.core.scoped_cache import ScopedCache
+from app.core.http_client import get_http_client
 
 # Cache configuration
 CACHE_TTL_SECONDS = 24 * 3600  # 24 hours
@@ -190,23 +191,23 @@ class LocationService:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=cls.TIMEOUT) as client:
-                response = await client.get(
-                    f"{cls.NOMINATIM_URL}/search",
-                    params=params,
-                    headers=headers,
+            client = await get_http_client()
+            response = await client.get(
+                f"{cls.NOMINATIM_URL}/search",
+                params=params,
+                headers=headers,
+                timeout=cls.TIMEOUT,
+            )
+            if response.status_code == 429:
+                log_warning(f"Nominatim rate limit exceeded for '{query}'")
+                raise httpx.HTTPStatusError(
+                    "Rate limit exceeded",
+                    request=response.request,
+                    response=response
                 )
 
-                if response.status_code == 429:
-                    log_warning(f"Nominatim rate limit exceeded for '{query}'")
-                    raise httpx.HTTPStatusError(
-                        "Rate limit exceeded",
-                        request=response.request,
-                        response=response
-                    )
-
-                response.raise_for_status()
-                data = response.json()
+            response.raise_for_status()
+            data = response.json()
 
             # Handle empty or invalid responses
             if not isinstance(data, list):
@@ -298,23 +299,24 @@ class LocationService:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=cls.TIMEOUT) as client:
-                response = await client.get(
-                    f"{cls.NOMINATIM_URL}/reverse",
-                    params=params,
-                    headers=headers,
+            client = await get_http_client()
+            response = await client.get(
+                f"{cls.NOMINATIM_URL}/reverse",
+                params=params,
+                headers=headers,
+                timeout=cls.TIMEOUT,
+            )
+
+            if response.status_code == 429:
+                log_warning(f"Nominatim rate limit exceeded for reverse geocode ({latitude}, {longitude})")
+                raise httpx.HTTPStatusError(
+                    "Rate limit exceeded",
+                    request=response.request,
+                    response=response
                 )
 
-                if response.status_code == 429:
-                    log_warning(f"Nominatim rate limit exceeded for reverse geocode ({latitude}, {longitude})")
-                    raise httpx.HTTPStatusError(
-                        "Rate limit exceeded",
-                        request=response.request,
-                        response=response
-                    )
-
-                response.raise_for_status()
-                data = response.json()
+            response.raise_for_status()
+            data = response.json()
 
             # Check if Nominatim returned an error response
             if isinstance(data, dict) and data.get("error"):
