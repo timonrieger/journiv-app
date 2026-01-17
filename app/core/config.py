@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     postgres_port: Optional[int] = None
 
 
+
     # Security
     secret_key: str = ""  # Must be set via environment variable
     access_token_expire_minutes: int = 15
@@ -89,6 +90,9 @@ class Settings(BaseSettings):
 
     # Redis Configuration (for OIDC state/cache and Celery)
     redis_url: Optional[str] = None  # e.g., "redis://localhost:6379/0"
+
+    # Auth cache (short-lived) to reduce DB lookups during request bursts
+    auth_user_cache_ttl_seconds: int = 60
 
     # Celery Configuration
     celery_broker_url: Optional[str] = None  # e.g., "redis://localhost:6379/0"

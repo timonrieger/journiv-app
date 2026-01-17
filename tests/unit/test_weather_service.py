@@ -44,9 +44,9 @@ def mock_cache():
 
 @pytest.fixture
 def mock_httpx_client():
-    with patch("app.services.weather_service.httpx.AsyncClient") as mock_client:
+    with patch("app.services.weather_service.get_http_client", new_callable=AsyncMock) as mock_client:
         client_instance = AsyncMock()
-        mock_client.return_value.__aenter__.return_value = client_instance
+        mock_client.return_value = client_instance
         yield client_instance
 
 @pytest.mark.asyncio

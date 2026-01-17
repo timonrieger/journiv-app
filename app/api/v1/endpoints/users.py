@@ -1,13 +1,15 @@
 """
 User endpoints.
 """
+import hashlib
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status, HTTPException
+from fastapi import APIRouter, Depends, status, HTTPException, Request
 from pydantic import BaseModel
 from sqlmodel import Session
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user, _get_user_cache
+from app.core.config import settings
 from app.core.database import get_session
 from app.core.logging_config import log_user_action, log_error
 from app.models.user import User
@@ -132,7 +134,8 @@ async def update_current_user(
 )
 async def delete_current_user(
     current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[Session, Depends(get_session)]
+    session: Annotated[Session, Depends(get_session)],
+    request: Request
 ):
     """
     Delete current user account and all associated data.
@@ -151,6 +154,24 @@ async def delete_current_user(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to delete user account"
             )
+
+        cache = _get_user_cache()
+        if cache:
+            cache.set(
+                scope_id=str(current_user.id),
+                cache_type="deleted",
+                value={"deleted": True},
+                ttl_seconds=settings.auth_user_cache_ttl_seconds,
+            )
+            auth_header = request.headers.get("Authorization")
+            token_value = None
+            if auth_header and auth_header.lower().startswith("bearer "):
+                token_value = auth_header.split(" ", 1)[1].strip()
+            if not token_value:
+                token_value = request.cookies.get("access_token")
+            if token_value:
+                token_hash = hashlib.sha256(token_value.encode("utf-8")).hexdigest()
+                cache.delete(scope_id=token_hash, cache_type="auth")
 
         log_user_action(current_user.email, "Deleted user", request_id="")
 

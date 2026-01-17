@@ -1,6 +1,7 @@
 """
 Shared API dependencies.
 """
+import hashlib
 import logging
 from typing import Annotated, Optional, Callable
 
@@ -9,7 +10,8 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, ExpiredSignatureError
 from sqlmodel import Session
 
-from app.core.config import JOURNIV_PLUS_DOC_URL
+from app.core.config import JOURNIV_PLUS_DOC_URL, settings
+from app.core.scoped_cache import ScopedCache
 from app.core.database import get_session
 from app.core.security import verify_token
 from app.middleware.request_logging import request_id_ctx
@@ -23,6 +25,17 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 
 # Alias for database session dependency
 get_db = get_session
+
+_user_cache: Optional[ScopedCache] = None
+
+
+def _get_user_cache() -> Optional[ScopedCache]:
+    if not settings.redis_url:
+        return None
+    global _user_cache
+    if _user_cache is None:
+        _user_cache = ScopedCache(namespace="user_cache")
+    return _user_cache
 
 
 def get_request_id() -> str:
@@ -90,6 +103,22 @@ async def get_current_user(
         logger.error("Unexpected token validation error", extra={"error": str(e)})
         raise credentials_exception
 
+    token_hash = hashlib.sha256(token_to_use.encode("utf-8")).hexdigest()
+    cache = _get_user_cache()
+    if cache:
+        deleted_marker = cache.get(scope_id=user_id, cache_type="deleted")
+        if deleted_marker:
+            raise credentials_exception
+        cached_user = cache.get(scope_id=token_hash, cache_type="auth")
+        if cached_user:
+            try:
+                user = User.model_validate(cached_user)
+                if not user.is_active:
+                    raise credentials_exception
+                return user
+            except Exception:
+                cache.delete(scope_id=token_hash, cache_type="auth")
+
     # Get user from database
     user = UserService(session).get_user_by_id(user_id)
     if user is None:
@@ -103,6 +132,13 @@ async def get_current_user(
             detail="User account is inactive"
         )
 
+    if cache:
+        cache.set(
+            scope_id=token_hash,
+            cache_type="auth",
+            value=user.model_dump(mode="json"),
+            ttl_seconds=settings.auth_user_cache_ttl_seconds,
+        )
     return user
 
 
@@ -216,5 +252,3 @@ async def get_plus_factory(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred while initializing Plus features"
         )
-
-
