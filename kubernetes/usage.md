@@ -164,9 +164,6 @@ You can use your DNS providers we portal to do similar. You just need to make su
 ## Applying the YAML in Kubernetes
 
 Now assuming the A Record is set, we can apply first the manifest.yaml:
-```
-$ kubectl apply -f ./kubernetes.yaml
-persistentvolumeclaim/journiv-data-pvc created
 deployment.apps/journiv-deployment created
 service/journiv-service created
 ```
