@@ -65,6 +65,9 @@ Journiv is a self-hosted private journal. It features comprehensive journaling c
 ## Quick Start
 Give Journiv a quick try with one docker command.
 
+> [!NOTE]
+> This `docker run` command starts a **minimal** version of Journiv. It lack components needed for various features of Journiv like import/export etc. For a complete docker compose file use [this](https://github.com/journiv/journiv-app/blob/refs/tags/latest/docker-compose.yml).
+
 ### Docker Run 
 
 ```bash
@@ -78,7 +81,7 @@ docker run -d \
   swalabtech/journiv-app:latest
 ```
 
-**Access Journiv:** Open `http://192.168.1.1:8000` (replace with your server IP) in your browser to start journaling!
+**Access Journiv:** Open `http://192.168.1.1:8000` (replace with your server IP) in your browser to try it out.
 
 **For complete installation guide see [installation guide](https://journiv.com/docs/installation).**
 
