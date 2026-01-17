@@ -1,5 +1,5 @@
 """
-Import job model for tracking async import operations.
+Import job models for tracking async import operations.
 """
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -17,8 +17,8 @@ class ImportJob(BaseModel, table=True):
     """
     Track import job progress and results.
 
-    Import jobs are created when a user uploads a file for import
-    and processed asynchronously by Celery workers.
+    Import jobs are created for various sources (file uploads, external integrations)
+    and processed asynchronously.
     """
     __tablename__ = "import_jobs"
 
@@ -27,6 +27,16 @@ class ImportJob(BaseModel, table=True):
         sa_column=Column(
             ForeignKey("user.id", ondelete="CASCADE"),
             nullable=False,
+            index=True
+        )
+    )
+
+    # Optional foreign key to entry (used by Immich imports)
+    entry_id: Optional[uuid.UUID] = Field(
+        default=None,
+        sa_column=Column(
+            ForeignKey("entry.id", ondelete="CASCADE"),
+            nullable=True,
             index=True
         )
     )
@@ -49,17 +59,18 @@ class ImportJob(BaseModel, table=True):
             nullable=False
         )
     )
-    file_path: str = Field(nullable=False, description="Path to uploaded file")
+    file_path: Optional[str] = Field(default=None, description="Path to uploaded file (if applicable)")
 
     # Progress tracking
     total_items: int = Field(default=0, description="Total number of items to import")
     processed_items: int = Field(default=0, description="Number of items processed so far")
+    failed_items: int = Field(default=0, description="Number of items that failed to import")
 
     # Results and errors
     result_data: Optional[Dict[str, Any]] = Field(
         default=None,
         sa_column=SQLModelColumn(JSON),
-        description="Final import statistics (journals, entries, media counts)"
+        description="Final import statistics (journals, entries, media counts) or extra metadata"
     )
     errors: Optional[List[str]] = Field(
         default=None,
@@ -72,7 +83,8 @@ class ImportJob(BaseModel, table=True):
         description="List of warning messages"
     )
 
-    # Completion timestamp
+    # Timing
+    started_at: Optional[datetime] = Field(default=None, description="When the job started processing")
     completed_at: Optional[datetime] = Field(default=None, description="When the job completed or failed")
 
     def __repr__(self) -> str:
@@ -82,23 +94,40 @@ class ImportJob(BaseModel, table=True):
         """Mark job as running."""
         self.status = JobStatus.RUNNING
         self.progress = 0
+        self.started_at = utc_now()
 
-    def update_progress(self, processed: int, total: int):
+    def update_progress(self, processed: int, total: int, failed: int = 0):
         """Update progress based on processed/total items."""
+        if self.status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.PARTIAL}:
+            return
         self.processed_items = processed
         self.total_items = total
+        self.failed_items = failed
         if total > 0:
-            self.progress = min(100, int((processed / total) * 100))
+            self.progress = min(100, int(((processed + failed) / total) * 100))
+
+        # Update status based on progress if it's an async job tracking individual items
+        if processed + failed >= total and total > 0:
+            if failed == 0:
+                self.status = JobStatus.COMPLETED
+            elif processed == 0:
+                self.status = JobStatus.FAILED
+            else:
+                self.status = JobStatus.PARTIAL
+            self.completed_at = utc_now()
+        elif processed + failed > 0:
+            self.status = JobStatus.RUNNING
 
     def set_progress(self, percent: int):
         """Set progress percentage directly."""
         self.progress = max(0, min(100, percent))
 
-    def mark_completed(self, result_data: Dict[str, Any]):
+    def mark_completed(self, result_data: Optional[Dict[str, Any]] = None):
         """Mark job as completed with results."""
         self.status = JobStatus.COMPLETED
         self.progress = 100
-        self.result_data = result_data
+        if result_data:
+            self.result_data = result_data
         self.completed_at = utc_now()
 
     def mark_failed(self, error_message: str):

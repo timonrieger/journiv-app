@@ -23,7 +23,7 @@ class MediaHandler:
     MIME_TYPE_MAP: ClassVar[dict[str, str]] = {
         '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
         '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp',
-        '.tiff': 'image/tiff', '.svg': 'image/svg+xml',
+        '.tiff': 'image/tiff', '.svg': 'image/svg+xml', '.heic': 'image/heic',
         '.mp4': 'video/mp4', '.avi': 'video/x-msvideo', '.mov': 'video/quicktime',
         '.webm': 'video/webm', '.mkv': 'video/x-matroska', '.flv': 'video/x-flv',
         '.m4v': 'video/x-m4v', '.wmv': 'video/x-ms-wmv',
@@ -33,7 +33,7 @@ class MediaHandler:
     }
 
     # Media type categorization by extension
-    IMAGE_EXTENSIONS: ClassVar[set[str]] = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
+    IMAGE_EXTENSIONS: ClassVar[set[str]] = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".svg", ".heic"}
     VIDEO_EXTENSIONS: ClassVar[set[str]] = {".mp4", ".avi", ".mov", ".wmv", ".webm", ".mkv", ".flv", ".m4v"}
     AUDIO_EXTENSIONS: ClassVar[set[str]] = {".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac", ".wma"}
 

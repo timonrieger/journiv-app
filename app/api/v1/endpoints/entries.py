@@ -19,7 +19,7 @@ from app.schemas.tag import TagResponse
 from app.services.entry_service import EntryService
 from app.services.tag_service import TagService
 
-router = APIRouter()
+router = APIRouter(prefix="/entries", tags=["entries"])
 logger = logging.getLogger(__name__)
 
 @router.post(

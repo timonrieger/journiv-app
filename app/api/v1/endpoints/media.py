@@ -7,9 +7,9 @@ import uuid
 from pathlib import Path
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, BackgroundTasks, Header, Request
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Header
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.api.dependencies import get_current_user
 from app.core import database as database_module
@@ -23,14 +23,20 @@ from app.core.exceptions import (
 from app.core.logging_config import LogCategory
 from app.models.user import User
 from app.schemas.entry import EntryMediaResponse
+from app.services import entry_service as entry_service_module
 from app.services import media_service as media_service_module
-from app.services.file_processing_service import FileProcessingService
+from app.services.import_job_service import ImportJobService
+from app.schemas.media import (
+    ImmichImportRequest,
+    ImmichImportStartResponse,
+    ImmichImportJobResponse
+)
+from app.core.celery_app import celery_app
 
 file_logger = logging.getLogger(LogCategory.FILE_UPLOADS.value)
 error_logger = logging.getLogger(LogCategory.ERRORS.value)
-security_logger = logging.getLogger(LogCategory.SECURITY.value)
 
-router = APIRouter()
+router = APIRouter(prefix="/media", tags=["media"])
 
 
 def _get_media_service():
@@ -44,6 +50,11 @@ def _get_db_session():
         yield from session_or_generator
     else:
         yield session_or_generator
+
+
+def _get_entry_service(session: Session):
+    """Get entry service instance."""
+    return entry_service_module.EntryService(session)
 
 
 def _send_bytes_range_requests(file_path: Path, start: int, end: int):
@@ -75,11 +86,10 @@ def _send_bytes_range_requests(file_path: Path, start: int, end: int):
     }
 )
 async def upload_media(
-    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     session: Annotated[Session, Depends(_get_db_session)],
     file: UploadFile = File(...),
-    entry_id: Optional[uuid.UUID] = Form(None),
+    entry_id: uuid.UUID = Form(...),
     alt_text: Optional[str] = Form(None),
 ):
     """
@@ -101,19 +111,15 @@ async def upload_media(
         media_record = result["media_record"]
         full_file_path = result["full_file_path"]
 
-        # Queue background processing if we have a real media record
         if media_record and hasattr(media_record, 'id') and full_file_path:
             try:
-                processing_service = FileProcessingService(session)
-                background_tasks.add_task(
-                    processing_service.process_uploaded_file_async,
-                    str(media_record.id),
-                    full_file_path,
-                    str(current_user.id)
+                celery_app.send_task(
+                    "app.tasks.media.process_media_upload",
+                    args=[str(media_record.id), full_file_path, str(current_user.id)]
                 )
             except Exception as e:
                 error_logger.warning(
-                    "Failed to queue background processing task",
+                    "Failed to queue media processing task",
                     extra={"user_id": str(current_user.id), "media_id": str(media_record.id), "error": str(e)}
                 )
 
@@ -384,6 +390,313 @@ async def get_supported_formats(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get supported formats"
+        )
+
+
+
+
+
+@router.post(
+    "/import-from-immich-async",
+    response_model=ImmichImportStartResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        400: {"description": "Invalid request or Immich not connected"},
+        401: {"description": "Not authenticated"},
+        403: {"description": "Account inactive"},
+        404: {"description": "Entry not found"},
+    }
+)
+async def import_from_immich_async(
+    request: ImmichImportRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[Session, Depends(_get_db_session)],
+):
+    """
+    Start an import job for Immich assets (supports both link-only and copy modes).
+
+    Behavior depends on integration.import_mode:
+    - LINK_ONLY: Creates placeholder media and processes metadata asynchronously
+    - COPY: Creates placeholder media and processes downloads asynchronously
+    """
+    from app.models.integration import Integration, IntegrationProvider, ImportMode
+    from app.services.import_job_service import ImportJobService
+    from sqlmodel import select
+
+    try:
+        # 1. Verify Immich integration exists and is active
+        immich_integration = session.exec(
+            select(Integration)
+            .where(Integration.user_id == current_user.id)
+            .where(Integration.provider == IntegrationProvider.IMMICH)
+        ).first()
+
+        if not immich_integration:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Immich integration not connected. Please connect in Settings."
+            )
+
+        if not immich_integration.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Immich integration is inactive. Please reconnect in Settings."
+            )
+
+        # 2. Verify entry exists
+        entry_service = _get_entry_service(session)
+        entry = entry_service.get_entry_by_id(request.entry_id, current_user.id)
+        if not entry:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Entry not found"
+            )
+
+        # 3. Create job and process asynchronously via Celery
+        import_service = ImportJobService(session)
+        job = await import_service.create_and_process_job_async(
+            user_id=current_user.id,
+            entry_id=request.entry_id,
+            asset_ids=request.asset_ids,
+            assets=request.assets
+        )
+
+        # Re-fetch placeholders for response
+        from app.models.entry import EntryMedia
+        placeholder_media = session.exec(
+             select(EntryMedia)
+             .where(EntryMedia.entry_id == request.entry_id)
+             .where(EntryMedia.external_provider == "immich")
+             .where(EntryMedia.external_asset_id.in_(request.asset_ids))
+        ).all()
+
+        if immich_integration.import_mode == ImportMode.LINK_ONLY:
+            try:
+                celery_app.send_task(
+                    "app.tasks.immich.process_link_only_import",
+                    args=[str(job.id)]
+                )
+                file_logger.info(
+                    f"Starting Immich import job (link-only): {len(request.asset_ids)} assets",
+                    extra={"user_id": str(current_user.id), "asset_count": len(request.asset_ids)}
+                )
+            except Exception as e:
+                file_logger.error(
+                    "Failed to dispatch Immich link-only import job",
+                    extra={"user_id": str(current_user.id), "job_id": str(job.id), "error": str(e)},
+                    exc_info=True
+                )
+                try:
+                    job.mark_failed(f"Celery dispatch failed: {e}")
+                    session.add(job)
+                    session.commit()
+                except Exception:
+                    file_logger.error("Failed to update job status after dispatch failure", extra={"job_id": str(job.id)})
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to queue Immich import job"
+                )
+        else:
+            try:
+                celery_app.send_task(
+                    "app.tasks.immich.process_copy_import",
+                    args=[str(job.id)]
+                )
+                file_logger.info(
+                    f"Starting Immich import job (copy mode): {len(request.asset_ids)} assets",
+                    extra={"user_id": str(current_user.id), "asset_count": len(request.asset_ids)}
+                )
+            except Exception as e:
+                file_logger.error(
+                    "Failed to dispatch Immich copy import job",
+                    extra={"user_id": str(current_user.id), "job_id": str(job.id), "error": str(e)},
+                    exc_info=True
+                )
+                job.mark_failed(f"Celery dispatch failed: {e}")
+                session.add(job)
+                try:
+                    session.commit()
+                except Exception:
+                    file_logger.error(
+                        "Failed to update job status after dispatch failure",
+                        extra={"user_id": str(current_user.id), "job_id": str(job.id)},
+                        exc_info=True
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to queue Immich import job"
+                )
+
+        file_logger.info(
+            f"Created async import job {job.id}: processing in background",
+            extra={"user_id": str(current_user.id), "job_id": str(job.id)}
+        )
+
+        return ImmichImportStartResponse(
+            job_id=job.id,
+            status="processing",
+            message=f"Import job started. Processing {len(request.asset_ids)} assets in background.",
+            total_assets=len(request.asset_ids),
+            media=[EntryMediaResponse.model_validate(record) for record in placeholder_media],
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_logger.error(
+            f"Failed to start async import: {e}",
+            extra={"user_id": str(current_user.id)},
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to start import job"
+        )
+
+
+@router.get(
+    "/import-jobs/{job_id}",
+    response_model=ImmichImportJobResponse,
+    responses={
+        401: {"description": "Not authenticated"},
+        403: {"description": "Account inactive"},
+        404: {"description": "Job not found"},
+    }
+)
+async def get_import_job_status(
+    job_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[Session, Depends(_get_db_session)],
+):
+    """
+    Get the status of an import job.
+
+    Poll this endpoint to track progress of an async import.
+    """
+    import_service = ImportJobService(session)
+    job = import_service.get_job(job_id, current_user.id)
+
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Import job not found"
+        )
+
+    return ImmichImportJobResponse.model_validate(job)
+
+
+@router.post(
+    "/immich/repair-thumbnails",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Repair missing thumbnails for Immich media",
+    description="""
+    Manually trigger a background job to repair missing thumbnails for Immich media.
+
+    **Purpose:**
+    - Downloads thumbnails for EntryMedia records that have external_asset_id
+      but missing thumbnail_path (e.g., from failed copy-mode imports)
+
+    **Behavior:**
+    - Processes all Immich media for the current user
+    - Only repairs media with external_provider='immich' and missing thumbnail_path
+    - Runs in background (returns immediately)
+    - Updates EntryMedia records with thumbnail_path on success
+
+    **Use Cases:**
+    - Repair thumbnails after copy-mode import failures
+    - Manual thumbnail refresh for existing Immich media
+    - Recovery after thumbnail storage issues
+
+    **Response:**
+    - Returns immediately with job status
+    - Check logs for repair progress
+    """
+)
+async def repair_immich_thumbnails(
+    current_user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[Session, Depends(_get_db_session)],
+):
+    """
+    Repair missing thumbnails for Immich media.
+    """
+    from app.models.integration import Integration, IntegrationProvider
+    from app.models.entry import Entry, EntryMedia
+    from sqlmodel import select
+
+    try:
+        # Verify Immich integration exists and is active
+        immich_integration = session.exec(
+            select(Integration)
+            .where(Integration.user_id == current_user.id)
+            .where(Integration.provider == IntegrationProvider.IMMICH)
+        ).first()
+
+        if not immich_integration or not immich_integration.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Immich integration not connected or inactive"
+            )
+
+        # Find EntryMedia records that need thumbnail repair
+        media_to_repair = session.exec(
+            select(EntryMedia)
+            .join(Entry, Entry.id == EntryMedia.entry_id)
+            .where(Entry.user_id == current_user.id)
+            .where(EntryMedia.external_provider == "immich")
+            .where(EntryMedia.external_asset_id.isnot(None))
+            .where(
+                (EntryMedia.thumbnail_path.is_(None)) |
+                (EntryMedia.thumbnail_path == "")
+            )
+        ).all()
+
+        if not media_to_repair:
+            return {
+                "status": "completed",
+                "message": "No media found that needs thumbnail repair",
+                "scheduled_count": 0
+            }
+
+        # Schedule background task
+        # Schedule background task using Celery to ensure fresh DB session
+        try:
+            celery_app.send_task(
+                "app.tasks.immich.repair_thumbnails",
+                args=[str(current_user.id), [str(m.external_asset_id) for m in media_to_repair if m.external_asset_id]]
+            )
+        except Exception as e:
+            file_logger.error(
+                "Failed to dispatch Immich thumbnail repair job",
+                extra={"user_id": str(current_user.id), "error": str(e)},
+                exc_info=True
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to start thumbnail repair"
+            )
+
+        file_logger.info(
+            f"Scheduled thumbnail repair for {len(media_to_repair)} Immich media",
+            extra={"user_id": str(current_user.id), "count": len(media_to_repair)}
+        )
+
+        return {
+            "status": "accepted",
+            "message": f"Thumbnail repair scheduled for {len(media_to_repair)} media items",
+            "scheduled_count": len(media_to_repair)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_logger.error(
+            f"Failed to start thumbnail repair: {e}",
+            extra={"user_id": str(current_user.id)},
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to start thumbnail repair"
         )
 
 

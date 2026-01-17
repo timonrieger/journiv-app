@@ -225,9 +225,6 @@ class CSPConfig:
             "X-XSS-Protection": "1; mode=block",
             "Referrer-Policy": "strict-origin-when-cross-origin",
             "Permissions-Policy": self._get_permissions_policy(),
-            "Cross-Origin-Embedder-Policy": "require-corp",
-            "Cross-Origin-Opener-Policy": "same-origin",
-            "Cross-Origin-Resource-Policy": "same-origin",
             "X-Permitted-Cross-Domain-Policies": "none",
             "X-Download-Options": "noopen"
         })
@@ -235,9 +232,9 @@ class CSPConfig:
 
     def _get_permissions_policy(self) -> str:
         permissions = [
-            "geolocation=()",
-            "microphone=()",
-            "camera=()",
+            "geolocation=(self)",
+            "microphone=(self)",
+            "camera=(self)",
             "payment=()",
             "usb=()",
             "magnetometer=()",

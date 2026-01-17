@@ -54,15 +54,24 @@ def process_import_job(self, job_id: str):
             job.set_progress(ProgressStages.IMPORT_EXTRACTING)
             db.commit()
 
-            # Extract import data
+            # Extract import data (skip for Day One - has custom extraction)
             file_path = Path(job.file_path)
-            data, media_dir = import_service.extract_import_data(file_path)
-            validation = validate_import_data(data, job.source_type.value)
-            if not validation.valid:
-                raise ValueError(f"Invalid import file: {validation.errors}")
 
-            total_entries = import_service.count_entries_in_data(data)
-            job.total_items = total_entries
+            if job.source_type == ImportSourceType.DAYONE:
+                # Day One has custom parsing; import_dayone_data computes totals
+                total_entries = None
+                data = None
+                media_dir = None
+            else:
+                # Generic extraction for Journiv and other formats
+                data, media_dir = import_service.extract_import_data(file_path)
+                validation = validate_import_data(data, job.source_type.value)
+                if not validation.valid:
+                    raise ValueError(f"Invalid import file: {validation.errors}")
+
+                total_entries = import_service.count_entries_in_data(data)
+
+            job.total_items = total_entries or 0
             job.processed_items = 0
 
             # Update progress: Processing (ensure minimum, but don't regress from extracting)
@@ -87,6 +96,15 @@ def process_import_job(self, job_id: str):
                     user_id=job.user_id,
                     data=data,
                     media_dir=media_dir,
+                    total_entries=total_entries,
+                    progress_callback=handle_progress,
+                )
+            elif job.source_type == ImportSourceType.DAYONE:
+                # Day One import doesn't use the generic extract_import_data
+                # because it has a different ZIP structure
+                summary = import_service.import_dayone_data(
+                    user_id=job.user_id,
+                    file_path=file_path,
                     total_entries=total_entries,
                     progress_callback=handle_progress,
                 )

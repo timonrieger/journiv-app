@@ -21,7 +21,7 @@ from app.services.import_service import ImportService
 from app.tasks.import_tasks import process_import_job
 from app.utils.import_export.media_handler import MediaHandler
 
-router = APIRouter()
+router = APIRouter(prefix="/import", tags=["import-export"])
 
 
 @router.post(
@@ -47,13 +47,14 @@ async def upload_import(
 
     **Supported source types:**
     - `journiv`: Journiv export ZIP file
+    - `dayone`: Day One JSON export ZIP file
     - `markdown`: Markdown files export (coming soon)
-    - `dayone`: Day One export (coming soon)
 
     **File requirements:**
     - Must be a ZIP archive
     - Maximum size: configured in IMPORT_EXPORT_MAX_FILE_SIZE_MB
-    - Must contain data.json file
+    - For Journiv: Must contain data.json file
+    - For Day One: Must contain Journal.json files and photos/ directory
 
     The import will be processed asynchronously. Use the job ID to check status.
     """
@@ -66,67 +67,32 @@ async def upload_import(
             detail=f"Invalid source type: {source_type}. Must be one of: journiv, markdown, dayone"
         )
 
-    if source_type_enum != ImportSourceType.JOURNIV:
+    # Day One and Journiv imports are now supported
+    if source_type_enum not in [ImportSourceType.JOURNIV, ImportSourceType.DAYONE]:
         raise HTTPException(
             status_code=400,
-            detail="Imports from this source will be available soon. Journiv ZIP imports are currently supported."
+            detail=f"Import source '{source_type}' not yet supported. Currently supported: journiv, dayone"
         )
 
-    # Validate file type
-    if not file.filename or not file.filename.lower().endswith('.zip'):
+    # Process upload using UploadManager
+    from app.utils.import_export import UploadManager
+
+    upload_path = None
+    try:
+        upload_path = await UploadManager.process_upload(
+            file=file,
+            source_type=source_type.lower()
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(e, request_id=None, user_email=current_user.email, context="import_upload_processing")
         raise HTTPException(
-            status_code=400,
-            detail="File must be a ZIP archive"
-        )
-
-    # Create temp upload directory
-    upload_dir = Path(settings.import_temp_dir) / "uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-
-    # Generate unique filename with sanitization
-    file_id = uuid.uuid4()
-    safe_filename = MediaHandler.sanitize_filename(file.filename or "import.zip")
-    upload_path = upload_dir / f"{file_id}_{safe_filename}"
+            status_code=500,
+            detail="An error occurred while processing the uploaded file"
+        ) from e
 
     try:
-        # Save uploaded file
-        chunk_size = 8192
-        total_size = 0
-        max_size_mb = settings.import_export_max_file_size_mb
-        too_large = False
-
-        with open(upload_path, "wb") as buffer:
-            while chunk := await file.read(chunk_size):
-                total_size += len(chunk)
-
-                # Check file size limit using shared utility
-                if not MediaHandler.validate_file_size(total_size, max_size_mb):
-                    too_large = True
-                    break
-
-                buffer.write(chunk)
-
-        if too_large:
-            # Clean up partial file after closing the file handle (Windows compatibility)
-            upload_path.unlink(missing_ok=True)
-            raise HTTPException(
-                status_code=413,
-                detail=f"File too large. Maximum size: {max_size_mb}MB"
-            )
-
-        # Validate ZIP structure
-        from app.utils.import_export import ZipHandler
-        zip_handler = ZipHandler()
-        validation = zip_handler.validate_zip_structure(upload_path)
-
-        if not validation["valid"]:
-            # Clean up invalid file
-            upload_path.unlink(missing_ok=True)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid ZIP file: {', '.join(validation['errors'])}"
-            )
-
         # Create import job
         import_service = ImportService(session)
         job = import_service.create_import_job(
@@ -159,25 +125,15 @@ async def upload_import(
             source_type=job.source_type.value,
         )
 
-    except HTTPException:
-        # Clean up on HTTP errors
-        upload_path.unlink(missing_ok=True)
-        raise
-    except (ValueError, OSError, IOError) as e:
-        # Narrow exception handling for file/validation errors
-        upload_path.unlink(missing_ok=True)
-        log_error(e, request_id=None, user_email=current_user.email, context="import_file_processing")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid import file: {str(e)}"
-        ) from e
     except Exception as e:
-        # Defensive catch-all for unexpected errors
-        upload_path.unlink(missing_ok=True)
-        log_error(e, request_id=None, user_email=current_user.email, context="import_file_processing_unexpected")
+        # Clean up if job creation failed
+        if upload_path and upload_path.exists():
+            upload_path.unlink(missing_ok=True)
+
+        log_error(e, request_id=None, user_email=current_user.email, context="import_job_creation")
         raise HTTPException(
             status_code=500,
-            detail="An error occurred while processing import file"
+            detail="An error occurred while creating the import job"
         ) from e
 
 

@@ -1,11 +1,13 @@
 # Import all models for easy access
 from .analytics import WritingStreak
 from .base import BaseModel
+from .instance_detail import InstanceDetail
 from .entry import Entry, EntryMedia
 from .entry_tag_link import EntryTagLink
 from .export_job import ExportJob
 from .external_identity import ExternalIdentity
 from .import_job import ImportJob
+from .integration import Integration
 from .journal import Journal
 from .mood import Mood, MoodLog
 from .prompt import Prompt
@@ -28,4 +30,6 @@ __all__ = [
     "ExternalIdentity",
     "ImportJob",
     "ExportJob",
+    "InstanceDetail",
+    "Integration",
 ]

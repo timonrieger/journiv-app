@@ -11,11 +11,6 @@ import pytest
 from tests.integration.helpers import EndpointCase, UNKNOWN_UUID, assert_requires_authentication
 from tests.lib import ApiUser, JournivApiClient, make_api_user
 
-pytestmark = pytest.mark.skipif(
-    not os.getenv("CELERY_BROKER_URL"),
-    reason="Celery worker not configured; export/import flows require Celery",
-)
-
 
 def _tiny_zip_with_data() -> bytes:
     buffer = io.BytesIO()

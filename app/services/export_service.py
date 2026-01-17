@@ -342,6 +342,7 @@ class ExportService:
             entry_count=journal.entry_count,  # Denormalized count
             last_entry_at=journal.last_entry_at,  # Last entry timestamp
             entries=entry_dtos,
+            import_metadata=journal.import_metadata,
             created_at=journal.created_at,
             updated_at=journal.updated_at,
         )
@@ -352,10 +353,9 @@ class ExportService:
 
         Maps database fields to DTO structure:
         - All three datetime fields: entry_date, entry_datetime_utc, entry_timezone
-        - entry.location -> location
+        - Structured fields: location_json, latitude, longitude, weather_json, weather_summary
         - entry.word_count, entry.is_pinned included
         - Creates MoodLogDTO from entry.mood_log if exists
-        - Placeholders: latitude, longitude, temperature set to None
         """
         tags = [tag.name for tag in entry.tags] if entry.tags else []
 
@@ -396,11 +396,15 @@ class ExportService:
             is_pinned=entry.is_pinned,  # Include pinned status
             tags=tags,
             mood_log=mood_log_dto,  # Use MoodLogDTO instead of separate fields
-            location=entry.location,
-            weather=entry.weather,
-            latitude=None,  # PLACEHOLDER: Not in database yet
-            longitude=None,  # PLACEHOLDER: Not in database yet
-            temperature=None,  # PLACEHOLDER: Not in database yet
+            # Structured location/weather fields
+            location_json=entry.location_json,
+            latitude=entry.latitude,
+            longitude=entry.longitude,
+            weather_json=entry.weather_json,
+            weather_summary=entry.weather_summary,
+            import_metadata=entry.import_metadata,
+            # PLACEHOLDER: For backward compatibility with other apps
+            temperature=None,  # Use weather_json.temp_c instead
             media=media_dtos,
             prompt_text=prompt_text,
             created_at=entry.created_at,

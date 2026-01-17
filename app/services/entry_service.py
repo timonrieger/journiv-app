@@ -126,12 +126,16 @@ class EntryService:
             entry_date=entry_date,
             entry_datetime_utc=entry_dt_utc,
             entry_timezone=entry_tz,
-            location=entry_data.location,
-            weather=entry_data.weather,
             journal_id=entry_data.journal_id,
             prompt_id=entry_data.prompt_id,
             word_count=word_count,
-            user_id=user_id
+            user_id=user_id,
+            # Structured location/weather fields
+            location_json=entry_data.location_json,
+            latitude=entry_data.latitude,
+            longitude=entry_data.longitude,
+            weather_json=entry_data.weather_json,
+            weather_summary=entry_data.weather_summary,
         )
 
         try:
@@ -269,10 +273,19 @@ class EntryService:
 
         if timestamp_changed or entry_data.entry_timezone is not None:
             self._refresh_entry_date(entry)
-        if entry_data.location is not None:
-            entry.location = entry_data.location
-        if entry_data.weather is not None:
-            entry.weather = entry_data.weather
+
+        # Update structured location/weather fields
+        if entry_data.location_json is not None:
+            entry.location_json = entry_data.location_json
+        if entry_data.latitude is not None:
+            entry.latitude = entry_data.latitude
+        if entry_data.longitude is not None:
+            entry.longitude = entry_data.longitude
+        if entry_data.weather_json is not None:
+            entry.weather_json = entry_data.weather_json
+        if entry_data.weather_summary is not None:
+            entry.weather_summary = entry_data.weather_summary
+
         if entry_data.is_pinned is not None:
             entry.is_pinned = entry_data.is_pinned
 
@@ -311,19 +324,24 @@ class EntryService:
 
         # Hard delete related EntryMedia records
         from app.services.media_service import MediaService
+        from app.services.media_storage_service import MediaStorageService
 
         media_statement = select(EntryMedia).where(EntryMedia.entry_id == entry_id)
         media_records = self.session.exec(media_statement).all()
 
         media_service = MediaService()
+        # Note: We'll create storage service AFTER commit when reference counts are accurate
         media_files_to_delete = []
 
         for media in media_records:
-            # Collect file paths for deletion (file_path is relative to media_root)
+            # Collect media info for reference-counted deletion BEFORE deleting from DB
             if media.file_path:
-                full_path = (media_service.media_root / media.file_path).resolve()
-                if full_path.exists() and str(full_path).startswith(str(media_service.media_root.resolve())):
-                    media_files_to_delete.append(str(full_path))
+                media_files_to_delete.append({
+                    'file_path': media.file_path,
+                    'checksum': media.checksum,  # May be None for older records
+                    'thumbnail_path': media.thumbnail_path,
+                    'force': media.checksum is None  # Force delete if no checksum
+                })
 
             self.session.delete(media)
 
@@ -366,12 +384,31 @@ class EntryService:
             # Log error but don't fail the deletion
             log_warning(f"Failed to update writing streak stats after entry deletion: {exc}")
 
-        # Delete physical media files from disk
-        for file_path in media_files_to_delete:
+        # Delete physical media files from disk using reference counting
+        # Create storage service with fresh session AFTER commit to get accurate reference counts
+        from app.core.database import get_session_context
+
+        for media_info in media_files_to_delete:
             try:
-                await media_service.delete_media_file(file_path)
+                # Create a new session for reference counting (after DB records are deleted)
+                with get_session_context() as fresh_session:
+                    media_storage_service = MediaStorageService(media_service.media_root, fresh_session)
+                    # Delete main file with reference counting
+                    # Force delete if no checksum (can't do reference counting without checksum)
+                    media_storage_service.delete_media(
+                        relative_path=media_info['file_path'],
+                        checksum=media_info['checksum'],
+                        user_id=str(user_id),
+                        force=media_info.get('force', False)
+                    )
+
+                # Delete thumbnail if it exists (thumbnails are not deduplicated)
+                if media_info['thumbnail_path']:
+                    thumbnail_full_path = (media_service.media_root / media_info['thumbnail_path']).resolve()
+                    if thumbnail_full_path.exists() and str(thumbnail_full_path).startswith(str(media_service.media_root.resolve())):
+                        thumbnail_full_path.unlink(missing_ok=True)
             except Exception as exc:
-                log_warning(f"Failed to delete media file {file_path} after entry deletion: {exc}")
+                log_warning(f"Failed to delete media file {media_info['file_path']} after entry deletion: {exc}")
 
         log_info(f"Entry hard-deleted for user {user_id}: {entry_id}")
         return True
@@ -453,7 +490,12 @@ class EntryService:
             alt_text=media_data.alt_text,
             upload_status=media_data.upload_status,
             file_metadata=media_data.file_metadata,
-            checksum=media_data.checksum
+            checksum=media_data.checksum,
+            external_provider=media_data.external_provider,
+            external_asset_id=media_data.external_asset_id,
+            external_url=media_data.external_url,
+            external_created_at=media_data.external_created_at,
+            external_metadata=media_data.external_metadata,
         )
 
         try:

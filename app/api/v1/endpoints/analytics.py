@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 from app.models.user import User
 from app.services.analytics_service import AnalyticsService
 
-router = APIRouter()
+router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 
 
@@ -193,3 +193,5 @@ async def get_analytics_dashboard(
             extra={"user_id": str(current_user.id), "days": days, "error": str(e)}
         )
         raise HTTPException(status_code=500, detail="An error occurred while fetching analytics dashboard")
+
+

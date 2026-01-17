@@ -16,6 +16,10 @@ try:
 except ImportError:
     make_url = None
 
+# Import version from package
+# Using JOURNIV_VERSION (not APP_VERSION) to prevent APP_VERSION env var from overriding app_version field
+from app import __version__ as JOURNIV_VERSION
+
 logger = logging.getLogger(__name__)
 
 # Insecure default that should never be used in production
@@ -24,6 +28,9 @@ DEFAULT_SQLITE_URL = "sqlite:////data/journiv.db"
 REDIS_OIDC_REQUIRED_MSG = (
     "REDIS_URL must be provided when OIDC_ENABLED=true."
 )
+
+JOURNIV_PLUS_DOC_URL = "https://journiv.com/plus"
+DEFAULT_PLUS_SERVER_URL = "https://plus.journiv.com"
 
 # Define the project root directory
 PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
@@ -34,7 +41,9 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "Journiv Service"
-    app_version: str = "0.1.0-beta.10"
+    # Version is forced from app.__init__.py via model_validator (see force_app_version_from_code)
+    # This prevents APP_VERSION env var from overriding the code version
+    app_version: str = ""  # Will be overridden by validator
     debug: bool = False
     environment: str = "development"
     domain_name: str = ""
@@ -61,6 +70,7 @@ class Settings(BaseSettings):
     postgres_port: Optional[int] = None
 
 
+
     # Security
     secret_key: str = ""  # Must be set via environment variable
     access_token_expire_minutes: int = 15
@@ -81,6 +91,9 @@ class Settings(BaseSettings):
     # Redis Configuration (for OIDC state/cache and Celery)
     redis_url: Optional[str] = None  # e.g., "redis://localhost:6379/0"
 
+    # Auth cache (short-lived) to reduce DB lookups during request bursts
+    auth_user_cache_ttl_seconds: int = 60
+
     # Celery Configuration
     celery_broker_url: Optional[str] = None  # e.g., "redis://localhost:6379/0"
     celery_result_backend: Optional[str] = None  # e.g., "redis://localhost:6379/0"
@@ -95,6 +108,16 @@ class Settings(BaseSettings):
     export_cleanup_days: int = 7  # Days to keep export files before cleanup
     import_temp_dir: str = "/data/imports/temp"
     export_dir: str = "/data/exports"
+
+    # Integrations Configuration
+    # Base URLs for family-shared self-hosted services (optional defaults)
+    immich_base_url: Optional[str] = None  # e.g., "https://photos.family.lan"
+    jellyfin_base_url: Optional[str] = None  # e.g., "https://media.family.lan"
+    audiobookshelf_base_url: Optional[str] = None  # e.g., "https://books.family.lan"
+
+    # Integration sync settings
+    integration_sync_interval_hours: int = 6  # How often to sync integrations
+    integration_cache_limit: int = 1000  # Max cached items per user per integration
 
     # CSP Configuration
     enable_csp: bool = True
@@ -113,6 +136,20 @@ class Settings(BaseSettings):
     ffprobe_timeout: int = 300  # 5 minutes for video metadata extraction
     ffmpeg_timeout: int = 300   # 5 minutes for video thumbnail generation
 
+    # Weather Configuration
+    open_weather_api_key_25: Optional[str] = None  # OpenWeather 2.5 API key
+    open_weather_api_key_30: Optional[str] = None  # OpenWeather 3.0 API key
+    weather_provider: str = "openweather"  # Weather provider (openweather)
+
+    @field_validator('open_weather_api_key_25', 'open_weather_api_key_30', mode='before')
+    @classmethod
+    def trim_weather_api_key(cls, v):
+        """Trim whitespace from weather API keys."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return v.strip() if v.strip() else None
+        return v
 
     # Application configuration
     app_port: int = 8000
@@ -135,6 +172,9 @@ class Settings(BaseSettings):
     rate_limit_default_limits: Optional[List[str]] = None
     rate_limit_config: Optional[Dict[str, Dict[str, str]]] = None
 
+    # Journiv Plus Server integration
+    plus_server_url: str = DEFAULT_PLUS_SERVER_URL
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=False,
@@ -148,7 +188,7 @@ class Settings(BaseSettings):
         if url.startswith("sqlite"):
             return "sqlite"
         elif url.startswith(("postgresql", "postgres")):
-            return "postgresql"
+            return "postgres"
         return "sqlite"
 
     @property
@@ -376,8 +416,8 @@ class Settings(BaseSettings):
         """Provide defaults for allowed_media_types if not set."""
         if v is None or not v:
             return [
-                "image/jpeg", "image/png", "image/gif", "image/webp",
-                "video/mp4", "video/avi", "video/mov", "video/webm",
+                "image/jpeg", "image/png", "image/gif", "image/webp", "image/heic",
+                "video/mp4", "video/avi", "video/mov", "video/webm", "video/x-m4v",
                 "audio/mpeg", "audio/wav", "audio/ogg", "audio/m4a", "audio/aac"
             ]
         return v
@@ -424,8 +464,8 @@ class Settings(BaseSettings):
         """Provide defaults for allowed_file_extensions if not set."""
         if v is None or not v:
             return [
-                ".jpg", ".jpeg", ".png", ".gif", ".webp",
-                ".mp4", ".avi", ".mov", ".webm",
+                ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic",
+                ".mp4", ".avi", ".mov", ".webm", ".m4v",
                 ".mp3", ".wav", ".ogg", ".m4a", ".aac"
             ]
         return v
@@ -595,6 +635,12 @@ class Settings(BaseSettings):
             return redis_url
 
         return v
+
+    @model_validator(mode='after')
+    def force_app_version_from_code(self) -> 'Settings':
+        """Force app_version to always use the version from code, ignoring env vars."""
+        self.app_version = JOURNIV_VERSION
+        return self
 
     @model_validator(mode='after')
     def construct_oidc_redirect_uri(self) -> 'Settings':
@@ -775,6 +821,21 @@ class Settings(BaseSettings):
 
 # Create settings instance
 settings = Settings()
+
+
+# Version check constants can be modified later by admin.
+VERSION_CHECK_ENABLED = True
+VERSION_CHECK_INTERVAL_HOURS = 12
+# Cache TTL: 4x the check interval (longer than check interval to ensure availability)
+# This ensures cached data is available even if checks are delayed
+VERSION_CHECK_CACHE_TTL = int(VERSION_CHECK_INTERVAL_HOURS * 4 * 3600)  # 4x interval in seconds
+
+# License refresh constants
+LICENSE_REFRESH_INTERVAL_HOURS = 6
+
+# License cache constants
+# Cache TTL: 8 hours (28800 seconds)
+LICENSE_CACHE_TTL = 28800
 
 
 def get_settings() -> Settings:

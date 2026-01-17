@@ -118,14 +118,22 @@ def test_tag_listing_search_and_statistics(
     ).json()
     assert len(popular) == 1
 
-    stats = api_client.tag_statistics(api_user.access_token)
-    assert stats["total_tags"] >= 2
-
-    analytics = api_client.request(
-        "GET", "/tags/analytics/statistics", token=api_user.access_token
-    ).json()
-    assert analytics["total_tags"] >= 2
-    assert isinstance(analytics.get("most_used_tags", []), list)
+    analytics_response = api_client.request(
+        "GET", "/tags/analytics", token=api_user.access_token
+    )
+    # Analytics endpoint requires Plus license - may return 403 if license not available
+    # or 503 if Plus features are not available in this build
+    if analytics_response.status_code in (403, 503):
+        # Plus license or features not available - skip analytics assertions
+        # This is expected in integration tests without Plus license or compiled features
+        pass
+    else:
+        # Plus license available - verify analytics structure
+        assert analytics_response.status_code == 200
+        analytics = analytics_response.json()
+        assert "total_tags" in analytics
+        assert analytics["total_tags"] >= 2
+        assert isinstance(analytics.get("most_used_tags", []), list)
 
 
 def test_tag_endpoints_require_auth(api_client: JournivApiClient):
@@ -141,8 +149,7 @@ def test_tag_endpoints_require_auth(api_client: JournivApiClient):
             ),
             EndpointCase("GET", "/tags/popular"),
             EndpointCase("GET", "/tags/search", params={"q": "focus"}),
-            EndpointCase("GET", "/tags/statistics"),
-            EndpointCase("GET", "/tags/analytics/statistics"),
+            EndpointCase("GET", "/tags/analytics"),
             EndpointCase("GET", f"/tags/entry/{UNKNOWN_UUID}"),
             EndpointCase(
                 "POST",

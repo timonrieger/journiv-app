@@ -398,11 +398,6 @@ class JournivApiClient:
             expected=(200,),
         ).json()
 
-    def tag_statistics(self, token: str) -> Dict[str, Any]:
-        return self.request(
-            "GET", "/tags/statistics", token=token, expected=(200,)
-        ).json()
-
     # ------------------------------------------------------------------ #
     # Mood helpers
     # ------------------------------------------------------------------ #

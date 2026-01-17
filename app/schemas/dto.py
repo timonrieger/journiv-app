@@ -89,21 +89,34 @@ class EntryDTO(BaseModel):
     """
     # Actual Entry fields
     title: Optional[str] = Field(None, max_length=300, description="Entry title")
-    content: str = Field(..., description="Entry content (plain text or markdown)")
+    content: Optional[str] = Field(None, description="Entry content (plain text or markdown)")
     entry_date: date = Field(..., description="User's local date for this entry")
     entry_datetime_utc: datetime = Field(..., description="UTC timestamp when entry occurred")
     entry_timezone: str = Field(default="UTC", description="IANA timezone for entry context")
     word_count: int = Field(default=0, description="Word count")
     is_pinned: bool = Field(default=False, description="Whether entry is pinned")
 
-    # Location and weather
-    location: Optional[str] = Field(None, max_length=200, description="Location name/description")
-    weather: Optional[str] = Field(None, max_length=100, description="Weather description")
+    # Structured location fields (persisted in database after migration d8f3a9e2b1c4)
+    location_json: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Structured location data (persisted as JSON/JSONB in database): {name, street, locality, admin_area, country, latitude, longitude, timezone}. This DTO field maps directly to the database location_json JSON/JSONB column when saved."
+    )
+    latitude: Optional[float] = Field(None, description="GPS latitude (persisted as Float in database after migration)")
+    longitude: Optional[float] = Field(None, description="GPS longitude (persisted as Float in database after migration)")
 
-    # PLACEHOLDER: GPS coordinates not yet in Entry model
-    latitude: Optional[float] = Field(None, description="PLACEHOLDER: GPS latitude (not in DB)")
-    longitude: Optional[float] = Field(None, description="PLACEHOLDER: GPS longitude (not in DB)")
-    temperature: Optional[float] = Field(None, description="PLACEHOLDER: Temperature in Celsius (not in DB)")
+    # Structured weather fields (new in DB)
+    weather_json: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Structured weather data: {temp_c, condition, code, service}"
+    )
+    weather_summary: Optional[str] = Field(None, description="Human-readable weather summary")
+    import_metadata: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Import metadata for preserving source details"
+    )
+
+    # PLACEHOLDER: For backward compatibility with other apps
+    temperature: Optional[float] = Field(None, description="PLACEHOLDER: Temperature in Celsius (use weather_json instead)")
 
     # Related data
     tags: List[str] = Field(default_factory=list, description="List of tag names")
@@ -164,6 +177,10 @@ class JournalDTO(BaseModel):
     # Denormalized fields
     entry_count: int = Field(default=0, description="Number of entries (denormalized)")
     last_entry_at: Optional[datetime] = Field(None, description="Timestamp of last entry")
+    import_metadata: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Import metadata for preserving source details"
+    )
 
     # Entries in this journal
     entries: List[EntryDTO] = Field(default_factory=list, description="Journal entries")
@@ -361,9 +378,14 @@ DATABASE SCHEMA MAPPING NOTES:
    - Placeholders: score, emoji, color (not in database)
 
 3. ENTRY LOCATION:
-   - Database: Single 'location' string field (max 200 chars)
-   - Database: 'weather' string field (max 100 chars)
-   - Placeholders: latitude, longitude, temperature (not in database)
+   - Database (after migration d8f3a9e2b1c4):
+     * location_json: JSON/JSONB field storing structured location data (persisted)
+     * latitude: Float field for GPS latitude (persisted)
+     * longitude: Float field for GPS longitude (persisted)
+   - Legacy (removed): Single 'location' varchar field (max 200 chars) was removed in migration d8f3a9e2b1c4
+   - DTO field location_json: Maps directly to database location_json JSON/JSONB column (persisted)
+   - DTO fields latitude, longitude: Map directly to database Float columns (persisted)
+   - Placeholder: temperature (not in database, use weather_json instead)
 
 4. ENTRY MEDIA:
    - Stored in 'entry_media' table with full metadata
@@ -401,7 +423,7 @@ PLACEHOLDER FIELDS (for future implementation):
 - MediaDTO: caption (use alt_text instead)
 - MoodDefinitionDTO: emoji, score, color (only name, icon, category exist)
 - MoodLogDTO: mood_score (not stored, added for Day one import compatibility)
-- EntryDTO: latitude, longitude, temperature (only location string exists, added for Day one import compatibility)
+- EntryDTO: temperature (not persisted in DB, use weather_json instead; added for Day One import compatibility)
 - UserSettingsDTO: date_format, time_format, first_day_of_week
 
 TODO: These placeholders maintain compatibility with import formats from other apps

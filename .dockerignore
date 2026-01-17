@@ -150,6 +150,8 @@ scripts/*.py
 scripts/*.sh
 # Exception: Include docker entrypoint script
 !scripts/docker-entrypoint.sh
+# Exception: Include migration script
+!scripts/migrate_media_storage.py
 
 # Docs / site builds
 docs/_build/

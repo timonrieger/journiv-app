@@ -175,12 +175,13 @@ class ZipHandler:
             raise IOError(f"Extraction failed: {e}") from e
 
     @staticmethod
-    def validate_zip_structure(zip_path: Path) -> Dict[str, Any]:
+    def validate_zip_structure(zip_path: Path, source_type: Optional[str] = None) -> Dict[str, Any]:
         """
         Validate ZIP file structure without extracting.
 
         Args:
             zip_path: Path to ZIP file
+            source_type: Import source type ('journiv', 'dayone', etc.)
 
         Returns:
             Dictionary with validation results:
@@ -216,15 +217,31 @@ class ZipHandler:
                 result["file_count"] = len(file_list)
                 result["total_size"] = sum(info.file_size for info in zipf.infolist())
 
-                # Check for data file
-                if "data.json" in file_list:
-                    result["has_data_file"] = True
+                # Check for data file based on source type
+                if source_type == "dayone":
+                    # Day One exports have .json files at root (e.g., Del1.json, MyJournal.json)
+                    # Check for any .json file at root level (not in subdirectories)
+                    root_json_files = [f for f in file_list if f.endswith(".json") and "/" not in f]
+                    if root_json_files:
+                        result["has_data_file"] = True
+                    else:
+                        result["valid"] = False
+                        result["errors"].append("Missing JSON file at root (Day One format expects JournalName.json)")
                 else:
-                    result["valid"] = False
-                    result["errors"].append("Missing data.json file")
+                    # Journiv exports have data.json
+                    if "data.json" in file_list:
+                        result["has_data_file"] = True
+                    else:
+                        result["valid"] = False
+                        result["errors"].append("Missing data.json file")
 
                 # Check for media directory
-                media_files = [f for f in file_list if f.startswith("media/")]
+                if source_type == "dayone":
+                    # Day One has photos/ and videos/ directories
+                    media_files = [f for f in file_list if f.startswith("photos/") or f.startswith("Photos/") or f.startswith("videos/") or f.startswith("Videos/")]
+                else:
+                    # Journiv has media/ directory
+                    media_files = [f for f in file_list if f.startswith("media/")]
                 result["has_media"] = len(media_files) > 0
 
                 # Check for path traversal

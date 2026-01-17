@@ -57,6 +57,11 @@ class InvalidFileTypeError(JournivAppException):
     pass
 
 
+class InvalidMediaTypeError(JournivAppException):
+    """Raised when media type is invalid or unrecognized."""
+    pass
+
+
 class FileValidationError(JournivAppException):
     """Raised when file validation fails."""
     pass
@@ -95,3 +100,21 @@ class TokenAlreadyRevokedError(JournivAppException):
 class ValidationError(JournivAppException):
     """Raised when validation fails."""
     pass
+
+
+class LicenseResetInstallIdMismatchError(JournivAppException):
+    """Raised when license reset install_id does not match this instance."""
+    pass
+
+
+class LicenseResetEmailMismatchError(JournivAppException):
+    """Raised when license reset email verification fails."""
+    pass
+
+
+class LicenseResetRateLimitedError(JournivAppException):
+    """Raised when license reset is rate limited by upstream."""
+
+    def __init__(self, retry_after: int):
+        super().__init__("Rate limit exceeded")
+        self.retry_after = retry_after

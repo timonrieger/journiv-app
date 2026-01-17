@@ -5,7 +5,7 @@ All timestamps are stored in UTC and converted to user's local timezone for disp
 Compatible with both SQLite and PostgreSQL.
 """
 
-from datetime import datetime, date, time, timedelta
+from datetime import datetime, date, time, timedelta, timezone
 from typing import Optional, Union
 from zoneinfo import ZoneInfo
 
@@ -22,7 +22,7 @@ def utc_now() -> datetime:
         >>> now.tzinfo
         datetime.timezone.utc
     """
-    return datetime.now(ZoneInfo("UTC"))
+    return datetime.now(timezone.utc)
 
 
 def ensure_utc(dt: datetime) -> datetime:
@@ -46,10 +46,10 @@ def ensure_utc(dt: datetime) -> datetime:
     """
     if dt.tzinfo is None:
         # Naive datetime - assume UTC
-        return dt.replace(tzinfo=ZoneInfo("UTC"))
+        return dt.replace(tzinfo=timezone.utc)
     else:
         # Convert to UTC
-        return dt.astimezone(ZoneInfo("UTC"))
+        return dt.astimezone(timezone.utc)
 
 
 def to_local(dt: datetime, tz_name: Optional[str] = None) -> datetime:
@@ -65,7 +65,7 @@ def to_local(dt: datetime, tz_name: Optional[str] = None) -> datetime:
         datetime: Datetime in user's local timezone
 
     Example:
-        >>> utc_dt = datetime(2024, 1, 1, 8, 0, 0, tzinfo=ZoneInfo("UTC"))
+        >>> utc_dt = datetime(2024, 1, 1, 8, 0, 0, tzinfo=timezone.utc)
         >>> local_dt = to_local(utc_dt, "America/Los_Angeles")
         >>> local_dt.hour
         0
@@ -122,7 +122,7 @@ def local_date_for_user(dt: datetime, tz_name: Optional[str] = None) -> date:
 
     Example:
         >>> # 11 PM PST on Dec 31 is 7 AM UTC on Jan 1
-        >>> utc_dt = datetime(2024, 1, 1, 7, 0, 0, tzinfo=ZoneInfo("UTC"))
+        >>> utc_dt = datetime(2024, 1, 1, 7, 0, 0, tzinfo=timezone.utc)
         >>> local_date_for_user(utc_dt, "America/Los_Angeles")
         datetime.date(2023, 12, 31)
     """
@@ -148,12 +148,12 @@ def start_of_local_day(user_date: date, tz_name: str = "UTC") -> datetime:
         >>> # Midnight PST on Jan 1, 2024
         >>> start = start_of_local_day(date(2024, 1, 1), "America/Los_Angeles")
         >>> start
-        datetime.datetime(2024, 1, 1, 8, 0, 0, tzinfo=ZoneInfo('UTC'))
+        datetime.datetime(2024, 1, 1, 8, 0, 0, tzinfo=timezone.utc)
     """
     local_tz = ZoneInfo(tz_name)
     local_midnight = datetime.combine(user_date, time.min)
     local_midnight = local_midnight.replace(tzinfo=local_tz)
-    return local_midnight.astimezone(ZoneInfo("UTC"))
+    return local_midnight.astimezone(timezone.utc)
 
 
 def end_of_local_day(user_date: date, tz_name: str = "UTC") -> datetime:
@@ -176,7 +176,7 @@ def end_of_local_day(user_date: date, tz_name: str = "UTC") -> datetime:
     local_tz = ZoneInfo(tz_name)
     local_end = datetime.combine(user_date, time.max)
     local_end = local_end.replace(tzinfo=local_tz)
-    return local_end.astimezone(ZoneInfo("UTC"))
+    return local_end.astimezone(timezone.utc)
 
 
 def serialize_datetime(dt: Optional[datetime]) -> Optional[str]:
@@ -190,7 +190,7 @@ def serialize_datetime(dt: Optional[datetime]) -> Optional[str]:
         str: ISO8601 string ending with 'Z', or None if input is None
 
     Example:
-        >>> dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=ZoneInfo("UTC"))
+        >>> dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         >>> serialize_datetime(dt)
         '2024-01-01T12:00:00Z'
     """
@@ -261,3 +261,40 @@ def validate_timezone(tz_name: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def normalize_timezone(tz_name: Optional[str]) -> str:
+    """
+    Normalize and validate a timezone string, with fallback to UTC.
+
+    Handles None values, strips whitespace, validates against IANA timezone
+    database, and falls back to UTC if invalid.
+
+    Args:
+        tz_name: IANA timezone string to normalize (can be None)
+
+    Returns:
+        str: Validated IANA timezone string, or "UTC" if invalid/None
+
+    Example:
+        >>> normalize_timezone("America/Los_Angeles")
+        "America/Los_Angeles"
+        >>> normalize_timezone("  America/New_York  ")
+        "America/New_York"
+        >>> normalize_timezone("Invalid/Timezone")
+        "UTC"
+        >>> normalize_timezone(None)
+        "UTC"
+        >>> normalize_timezone("")
+        "UTC"
+    """
+    from app.core.logging_config import log_warning
+
+    normalized = (tz_name or "UTC").strip() or "UTC"
+    try:
+        ZoneInfo(normalized)
+        return normalized
+    except Exception:
+        if tz_name:  # Only log warning if user actually provided a value
+            log_warning(f"Invalid timezone '{normalized}', defaulting to UTC", timezone=normalized)
+        return "UTC"

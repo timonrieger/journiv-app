@@ -15,7 +15,7 @@ from app.models.user import User
 from app.schemas.journal import JournalCreate, JournalUpdate, JournalResponse
 from app.services.journal_service import JournalService
 
-router = APIRouter()
+router = APIRouter(prefix="/journals", tags=["journals"])
 
 
 @router.post(

@@ -7,7 +7,8 @@ from typing import List, Optional, TYPE_CHECKING
 
 from pydantic import field_validator
 from sqlalchemy import Column, ForeignKey, Enum as SAEnum
-from sqlmodel import Field, Relationship, Index, CheckConstraint
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlmodel import Field, Relationship, Index, CheckConstraint, Column as SQLModelColumn, JSON
 
 from .base import BaseModel
 from .enums import JournalColor
@@ -15,6 +16,9 @@ from .enums import JournalColor
 if TYPE_CHECKING:
     from .user import User
     from .entry import Entry
+
+
+JSONType = JSONB().with_variant(JSON, "sqlite")
 
 
 class Journal(BaseModel, table=True):
@@ -44,6 +48,13 @@ class Journal(BaseModel, table=True):
     entry_count: int = Field(default=0, ge=0)  # Denormalized for performance
     total_words: int = Field(default=0, ge=0)  # Denormalized for performance
     last_entry_at: Optional[datetime] = None
+    import_metadata: Optional[dict] = Field(
+        default=None,
+        sa_column=SQLModelColumn(
+            JSONType
+        ),
+        description="Import metadata for preserving source details"
+    )
 
     # Relations
     user: "User" = Relationship(back_populates="journals")

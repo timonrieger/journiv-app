@@ -1,7 +1,7 @@
 # =========================
 # Stage 1: Builder
 # =========================
-FROM python:3.11-alpine AS builder
+FROM python:3.11-slim-bookworm AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
   PYTHONUNBUFFERED=1 \
@@ -11,15 +11,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Install build dependencies (includes ffmpeg)
-RUN apk add --no-cache --virtual .build-deps \
-  gcc \
-  musl-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  build-essential \
   libffi-dev \
-  postgresql-dev \
-  libmagic \
+  libpq-dev \
+  libmagic1 \
+  libmagic-dev \
   curl \
   ffmpeg \
-  build-base \
+  && rm -rf /var/lib/apt/lists/* \
   && echo "🔍 Checking FFmpeg license (builder stage)..." \
   && ffmpeg -version | grep -E "enable-gpl|enable-nonfree" && (echo "❌ GPL/nonfree FFmpeg detected!" && exit 1) || echo "✅ LGPL FFmpeg build verified."
 
@@ -31,7 +31,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 # =========================
 # Stage 2: Runtime
 # =========================
-FROM python:3.11-alpine AS runtime
+FROM python:3.11-slim-bookworm AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
   PYTHONUNBUFFERED=1 \
@@ -43,19 +43,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Install runtime dependencies and verify ffmpeg license
-RUN apk add --no-cache \
-  libmagic \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  libmagic1 \
   curl \
   ffmpeg \
-  libffi \
-  postgresql-libs \
-  libpq \
+  libffi8 \
+  libpq5 \
+  ca-certificates \
+  && rm -rf /var/lib/apt/lists/* \
   && echo "🔍 Checking FFmpeg license (runtime stage)..." \
   && ffmpeg -version | grep -E "enable-gpl|enable-nonfree" && (echo "❌ GPL/nonfree FFmpeg detected!" && exit 1) || echo "✅ LGPL FFmpeg build verified."
 
 # Copy installed Python packages from builder
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+COPY --from=builder /usr/local/bin/gunicorn /usr/local/bin/
+COPY --from=builder /usr/local/bin/celery /usr/local/bin/
+COPY --from=builder /usr/local/bin/alembic /usr/local/bin/
 
 # Copy app code and assets
 COPY app/ app/
@@ -68,6 +71,7 @@ COPY alembic.ini .
 COPY scripts/moods.json scripts/moods.json
 COPY scripts/prompts.json scripts/prompts.json
 COPY scripts/docker-entrypoint.sh scripts/docker-entrypoint.sh
+COPY scripts/migrate_media_storage.py scripts/migrate_media_storage.py
 
 # Copy prebuilt Flutter web app
 COPY web/ web/
@@ -76,11 +80,11 @@ COPY web/ web/
 COPY LICENSE.md .
 
 # Create non-root user and set up data directories
-RUN adduser -D -u 1000 appuser \
+RUN adduser --disabled-password --gecos "" --uid 1000 appuser \
   && mkdir -p /data/media /data/logs \
   && chmod +x scripts/docker-entrypoint.sh \
   # Fix permissions in case some directories gets copied as 700
-  && chmod -R a+rX /app \
+  && chmod -R u+rwX,g+rX /app \
   && chmod -R a+rwX /data \
   && chown -R appuser:appuser /app /data
 
@@ -90,10 +94,10 @@ EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
   CMD sh -c '\
-    if [ "${SERVICE_ROLE:-app}" = "celery-worker" ]; then \
-      celery -A app.core.celery_app inspect ping --timeout=5 | grep -q "pong"; \
-    else \
-      curl -f http://localhost:8000/api/v1/health; \
-    fi'
+  if [ "${SERVICE_ROLE:-app}" = "celery-worker" ]; then \
+  celery -A app.core.celery_app inspect ping --timeout=5 | grep -q "pong"; \
+  else \
+  curl -f http://localhost:8000/api/v1/health; \
+  fi'
 
-CMD ["/app/scripts/docker-entrypoint.sh"]
+ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]

@@ -46,12 +46,24 @@ class AnalyticsService:
         return streak
 
     def update_writing_streak(self, user_id: uuid.UUID, entry_date: date) -> WritingStreak:
-        """Update writing streak when a new entry is created."""
+        """Update writing streak when a new entry is created.
+
+        Note: If the entry is backdated (earlier than last_entry_date),
+        we recalculate the entire streak to ensure accuracy.
+        """
         streak = self.get_writing_streak(user_id)
         if not streak:
             streak = self.create_writing_streak(user_id)
 
-        # Calculate if this is a consecutive day
+        # If backdated entry, recalculate everything from scratch
+        if streak.last_entry_date and entry_date < streak.last_entry_date:
+            log_info(f"Backdated entry detected for user {user_id}: {entry_date} < {streak.last_entry_date}. Recalculating streak.")
+            # Flush the session to ensure the entry is visible in queries
+            self.session.flush()
+            result = self.recalculate_writing_streak_stats(user_id)
+            return result if result is not None else streak
+
+        # Calculate if this is a consecutive day (only for forward-dated or same-day entries)
         if streak.last_entry_date:
             days_diff = (entry_date - streak.last_entry_date).days
             if days_diff == 1:
@@ -75,7 +87,7 @@ class AnalyticsService:
             if streak.current_streak > streak.longest_streak:
                 streak.longest_streak = streak.current_streak
 
-        # Update last entry date
+        # Update last entry date (only if current or future date)
         streak.last_entry_date = entry_date
 
         # Update total entries and words
@@ -162,6 +174,8 @@ class AnalyticsService:
         Returns:
             Dict with current_streak, longest_streak, last_entry_date, streak_start_date
         """
+        # Expire all to ensure we get fresh data from the database
+        self.session.expire_all()
         entries = self.session.exec(
             select(Entry).where(Entry.user_id == user_id).order_by(Entry.entry_date.desc())
         ).all()
@@ -325,7 +339,7 @@ class AnalyticsService:
                 Entry.user_id == user_id,
                 Entry.entry_datetime_utc >= month_start
             )
-        ).first() or 0
+        ).one() or 0
 
         current_month_words = self.session.exec(
             select(func.coalesce(func.sum(Entry.word_count), 0))
@@ -333,7 +347,7 @@ class AnalyticsService:
                 Entry.user_id == user_id,
                 Entry.entry_datetime_utc >= month_start
             )
-        ).first() or 0
+        ).one() or 0
 
         # Get last month stats for comparison
         last_month_end = month_start - timedelta(seconds=1)
@@ -346,19 +360,20 @@ class AnalyticsService:
                 Entry.entry_datetime_utc >= last_month_start,
                 Entry.entry_datetime_utc < month_start
             )
-        ).first() or 0
+        ).one() or 0
 
         # Calculate growth
         entry_growth = 0
         if last_month_entries and last_month_entries > 0:
             entry_growth = ((current_month_entries - last_month_entries) / last_month_entries) * 100
 
+        today_day = now.date().day
         return {
             'current_month_entries': current_month_entries,
             'current_month_words': current_month_words,
             'entry_growth_percentage': round(entry_growth, 2),
-            'average_daily_entries': round(current_month_entries / now.day, 2) if now.day > 0 else 0,
-            'average_words_per_day': round(current_month_words / now.day, 2) if now.day > 0 else 0
+            'average_daily_entries': round(current_month_entries / today_day, 2),
+            'average_words_per_day': round(current_month_words / today_day, 2)
         }
 
     def get_journal_analytics(self, user_id: uuid.UUID) -> Dict[str, Any]:

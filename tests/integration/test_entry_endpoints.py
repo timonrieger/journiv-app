@@ -20,14 +20,16 @@ def test_entry_crud_and_pin_flow(
         title="My first entry",
         content="Writing something meaningful.",
         entry_date=date.today().isoformat(),
-        location="Home",
-        weather="Sunny",
+        location_json={"name": "Home"},
+        weather_json={"condition": "Sunny", "temp_c": 21.0},
+        weather_summary="Sunny",
     )
 
     entry_id = created["id"]
     assert created["journal_id"] == journal["id"]
-    assert created["location"] == "Home"
-    assert created["weather"] == "Sunny"
+    assert created["location_json"]["name"] == "Home"
+    assert created["weather_json"]["condition"] == "Sunny"
+    assert created["weather_summary"] == "Sunny"
 
     fetched = api_client.get_entry(api_user.access_token, entry_id)
     assert fetched["title"] == "My first entry"
@@ -35,10 +37,14 @@ def test_entry_crud_and_pin_flow(
     updated = api_client.update_entry(
         api_user.access_token,
         entry_id,
-        {"title": "Updated title", "content": "Updated content", "location": "Office"},
+        {
+            "title": "Updated title",
+            "content": "Updated content",
+            "location_json": {"name": "Office"},
+        },
     )
     assert updated["title"] == "Updated title"
-    assert updated["location"] == "Office"
+    assert updated["location_json"]["name"] == "Office"
 
     pinned = api_client.pin_entry(api_user.access_token, entry_id)
     assert pinned["is_pinned"] is True
@@ -80,13 +86,15 @@ def test_update_entry_adjusts_metadata(
         "title": "Edited title",
         "content": "This entry has four words.",
         "entry_date": new_date,
-        "weather": "Rainy",
+        "weather_json": {"condition": "Rainy", "temp_c": 18.0},
+        "weather_summary": "Rainy",
     }
 
     updated = api_client.update_entry(api_user.access_token, entry["id"], payload)
     assert updated["title"] == "Edited title"
     assert updated["entry_date"] == new_date
-    assert updated["weather"] == "Rainy"
+    assert updated["weather_json"]["condition"] == "Rainy"
+    assert updated["weather_summary"] == "Rainy"
     assert updated["word_count"] == 5
 
 

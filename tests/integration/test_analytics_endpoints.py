@@ -8,6 +8,8 @@ from typing import Any, Dict
 
 import pytest
 
+from app.core.time_utils import utc_now
+
 from tests.integration.helpers import EndpointCase, assert_requires_authentication
 from tests.lib import ApiUser, JournivApiClient
 
@@ -50,8 +52,9 @@ def analytics_dataset(
     primary = journal_factory(title="Analytics Primary")
     secondary = journal_factory(title="Analytics Secondary")
 
-    today = date.today()
-    month_start = today.replace(day=1)
+    # Use UTC-based date to avoid timezone-dependent mismatches with utc_now()
+    utc_date = utc_now().date()
+    month_start = utc_date.replace(day=1)
     last_month_end = month_start - timedelta(days=1)
     last_month_start = last_month_end.replace(day=1)
 
@@ -97,11 +100,11 @@ def analytics_dataset(
     # Entries that build history outside the streak.
     last_month_entry_date = last_month_start + timedelta(days=2)
     _create_entry(secondary, last_month_entry_date, 15, "Secondary last month")
-    _create_entry(secondary, today - timedelta(days=6), 12, "Secondary active entry")
-    _create_entry(primary, today - timedelta(days=10), 18, "Primary warmup")
+    _create_entry(secondary, utc_date - timedelta(days=6), 12, "Secondary active entry")
+    _create_entry(primary, utc_date - timedelta(days=10), 18, "Primary warmup")
 
     # Create a 4-day streak leading up to today.
-    streak_dates = [today - timedelta(days=offset) for offset in range(3, -1, -1)]
+    streak_dates = [utc_date - timedelta(days=offset) for offset in range(3, -1, -1)]
     streak_entries = []
     for idx, entry_date in enumerate(streak_dates):
         words = 20 + (idx * 10)
@@ -227,8 +230,8 @@ def test_productivity_metrics_compare_current_and_last_month(
     assert metrics["current_month_entries"] == analytics_dataset.current_month_entries
     assert metrics["current_month_words"] == analytics_dataset.current_month_words
 
-    today = date.today()
-    divisor = today.day or 1
+    today_utc = utc_now().date()
+    divisor = today_utc.day
     expected_avg_entries = round(analytics_dataset.current_month_entries / divisor, 2)
     expected_avg_words = round(analytics_dataset.current_month_words / divisor, 2)
     assert metrics["average_daily_entries"] == pytest.approx(expected_avg_entries, abs=0.5)

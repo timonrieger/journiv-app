@@ -5,6 +5,7 @@ import logging
 import logging.handlers
 from enum import Enum
 from pathlib import Path
+from typing import Optional
 
 
 class LogCategory(str, Enum):
@@ -17,6 +18,7 @@ class LogCategory(str, Enum):
     ERRORS = "app.errors"
     DB = "app.db"
     SECURITY = "app.security"
+    PLUS = "app.plus"
 
 
 DEFAULT_LOG_LEVEL = logging.INFO
@@ -47,6 +49,37 @@ SENSITIVE_FIELDS = {
     'oidc_client_secret',
     'oidcclientsecret',
 }
+
+
+def redact_coordinates(latitude: Optional[float] = None, longitude: Optional[float] = None) -> Optional[dict]:
+    """
+    Redact precise coordinates by rounding to coarse geo-bin.
+
+    Rounds coordinates to 1 decimal place (~11km precision) to provide
+    general location without precise coordinates.
+
+    Args:
+        latitude: Latitude coordinate (must be in range -90 to 90)
+        longitude: Longitude coordinate (must be in range -180 to 180)
+
+    Returns:
+        Dictionary with redacted coordinates (or None if not provided or invalid)
+    """
+    result = {}
+
+    if latitude is not None:
+        if -90 <= latitude <= 90:
+            result['latitude_approx'] = round(latitude, 1)
+        else:
+            log_warning(f"Invalid latitude value {latitude} (must be between -90 and 90), omitting from log")
+
+    if longitude is not None:
+        if -180 <= longitude <= 180:
+            result['longitude_approx'] = round(longitude, 1)
+        else:
+            log_warning(f"Invalid longitude value {longitude} (must be between -180 and 180), omitting from log")
+
+    return result if result else None
 
 
 def _sanitize_data(data):
@@ -209,7 +242,7 @@ def get_request_logger():
     return RequestContextLogger(LogCategory.REQUEST)
 
 
-def _log_with_context(logger: logging.Logger, level: int, message: str, request_id: str = None, exc_info: bool = False, **kwargs):
+def _log_with_context(logger: logging.Logger, level: int, message: str, request_id: Optional[str] = None, exc_info: bool = False, **kwargs):
     """Internal helper to format logs with an optional request ID and extra context.
 
     Args:
@@ -264,24 +297,59 @@ def log_info(message: str, request_id: str = None, **kwargs):
     _log_with_context(logger, logging.INFO, message, request_id, **kwargs)
 
 
-def log_warning(message: str, request_id: str = None, **kwargs):
-    """Log warning messages with request ID."""
+def log_debug(message: str, request_id: str = None, **kwargs):
+    """Log debug messages with request ID."""
     logger = logging.getLogger(LogCategory.APP)
-    _log_with_context(logger, logging.WARNING, message, request_id, **kwargs)
+    _log_with_context(logger, logging.DEBUG, message, request_id, **kwargs)
 
 
-def log_error(error: Exception | str, request_id: str = None, user_email: str = None, **kwargs):
+def log_warning(
+    message_or_error: Exception | str,
+    message: Optional[str] = None,
+    request_id: Optional[str] = None,
+    **kwargs
+):
+    """Log warning messages with request ID.
+
+    Args:
+        message_or_error: Exception object or warning message string
+        message: Optional override for the log message
+        request_id: Optional request ID for context
+        **kwargs: Additional context (e.g., media_id, user_id)
+    """
+    logger = logging.getLogger(LogCategory.APP)
+    if isinstance(message_or_error, Exception):
+        log_message = message or str(message_or_error)
+        exc_info = True
+    else:
+        log_message = message or message_or_error
+        exc_info = False
+    _log_with_context(logger, logging.WARNING, log_message, request_id, exc_info=exc_info, **kwargs)
+
+
+def log_error(
+    error: Exception | str,
+    *,
+    message: Optional[str] = None,
+    request_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+    **kwargs
+):
     """Log errors with request ID.
 
     Args:
         error: Exception object or error message string
+        message: Optional override for the log message (keyword-only)
         request_id: Optional request ID for context
         user_email: Optional user email for context
         **kwargs: Additional context (e.g., media_id, user_id)
     """
     logger = logging.getLogger(LogCategory.ERRORS)
     user_info = f" (user: {user_email})" if user_email else ""
-    message = f"Error: {str(error)}{user_info}"
+    if message:
+        log_message = f"{message}: {str(error)}{user_info}"
+    else:
+        log_message = f"Error: {str(error)}{user_info}"
     # exc_info should only be True if we have an actual Exception
     exc_info = isinstance(error, Exception)
-    _log_with_context(logger, logging.ERROR, message, request_id, exc_info=exc_info, **kwargs)
+    _log_with_context(logger, logging.ERROR, log_message, request_id, exc_info=exc_info, **kwargs)

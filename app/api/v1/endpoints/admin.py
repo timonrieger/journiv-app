@@ -19,7 +19,7 @@ from app.schemas.user import (
 )
 from app.services.user_service import UserService
 
-router = APIRouter(prefix="/admin")
+router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 def _build_user_response(user: User, user_service: UserService) -> dict:
@@ -36,8 +36,7 @@ def _build_user_response(user: User, user_service: UserService) -> dict:
     responses={
         403: {"description": "Admin access required"},
         500: {"description": "Internal server error"},
-    },
-    tags=["admin"]
+    }
 )
 async def list_users(
     admin: Annotated[User, Depends(get_current_admin_user)],
@@ -97,8 +96,7 @@ async def list_users(
         400: {"description": "Email already registered or invalid data"},
         403: {"description": "Admin access required"},
         500: {"description": "Internal server error"},
-    },
-    tags=["admin"]
+    }
 )
 async def create_user(
     admin: Annotated[User, Depends(get_current_admin_user)],
@@ -146,8 +144,7 @@ async def create_user(
         403: {"description": "Admin access required"},
         404: {"description": "User not found"},
         500: {"description": "Internal server error"},
-    },
-    tags=["admin"]
+    }
 )
 async def update_user(
     user_id: uuid.UUID,
@@ -199,8 +196,7 @@ async def update_user(
         403: {"description": "Admin access required"},
         404: {"description": "User not found"},
         500: {"description": "Internal server error"},
-    },
-    tags=["admin"]
+    }
 )
 async def delete_user(
     user_id: uuid.UUID,

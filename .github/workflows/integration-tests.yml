@@ -47,6 +47,30 @@ jobs:
           pip install -r requirements/base.txt
           pip install -r requirements/test.txt
 
+      - name: Download Plus native modules (latest release)
+        env:
+          GH_TOKEN: ${{ secrets.PLUS_FEATURES_REPO_TOKEN }}
+          PLUS_FEATURES_REPO: journiv/journiv-plus-features
+        run: |
+          set -eo pipefail
+
+          if [ -z "$GH_TOKEN" ]; then
+            echo "ERROR: PLUS_FEATURES_REPO_TOKEN secret not set"
+            exit 1
+          fi
+
+          DOWNLOAD_DIR=$(mktemp -d)
+          trap "rm -rf $DOWNLOAD_DIR" EXIT
+          gh release download latest -R "$PLUS_FEATURES_REPO" -p "*.so" -D "$DOWNLOAD_DIR"
+
+          mkdir -p app/plus
+          mv "$DOWNLOAD_DIR"/*.so app/plus/
+          if ! ls app/plus/*.so 1> /dev/null 2>&1; then
+            echo "ERROR: No .so files were downloaded"
+            exit 1
+          fi
+          ls -lh app/plus/
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -95,8 +119,13 @@ jobs:
         run: |
           echo "🧹 Cleaning up any previous Docker containers and volumes..."
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            COMPOSE_FILE="docker-compose.yml"
+          else
+            COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+          fi
           APP_VERSION=latest docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             down -v 2>/dev/null || true
 
@@ -109,15 +138,20 @@ jobs:
         run: |
           echo "🚀 Starting Journiv services with APP_VERSION=latest (${{ matrix.database }})..."
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            COMPOSE_FILE="docker-compose.yml"
+          else
+            COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+          fi
           APP_VERSION=latest docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             --env-file .env up -d
 
           echo "📋 Checking running containers..."
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
           APP_VERSION=latest docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             ps
 
@@ -140,8 +174,13 @@ jobs:
             if [ $((ATTEMPT % 5)) -eq 0 ]; then
               echo "📊 Container status:"
               export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+              if [ "${{ matrix.database }}" = "postgres" ]; then
+                COMPOSE_FILE="docker-compose.yml"
+              else
+                COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+              fi
               APP_VERSION=latest docker compose \
-                -f docker-compose.prod.${{ matrix.database }}.yml \
+                -f $COMPOSE_FILE \
                 -f docker-compose.override.ci.yml \
                 ps
             fi
@@ -153,15 +192,20 @@ jobs:
             echo "❌ Journiv failed to become healthy after $MAX_ATTEMPTS attempts"
             echo "📋 Final container status:"
             export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+            if [ "${{ matrix.database }}" = "postgres" ]; then
+              COMPOSE_FILE="docker-compose.yml"
+            else
+              COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+            fi
             APP_VERSION=latest docker compose \
-              -f docker-compose.prod.${{ matrix.database }}.yml \
+              -f $COMPOSE_FILE \
               -f docker-compose.override.ci.yml \
               ps
 
             echo "📋 Application logs:"
             export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
             APP_VERSION=latest docker compose \
-              -f docker-compose.prod.${{ matrix.database }}.yml \
+              -f $COMPOSE_FILE \
               -f docker-compose.override.ci.yml \
               logs app
             exit 1
@@ -196,8 +240,13 @@ jobs:
         run: |
           echo "📋 Full application logs:"
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            COMPOSE_FILE="docker-compose.yml"
+          else
+            COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+          fi
           APP_VERSION=latest docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             logs app
 
@@ -205,7 +254,7 @@ jobs:
             echo "📋 Postgres logs:"
             export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
             APP_VERSION=latest docker compose \
-              -f docker-compose.prod.${{ matrix.database }}.yml \
+              -f $COMPOSE_FILE \
               -f docker-compose.override.ci.yml \
               logs postgres
           fi
@@ -215,8 +264,13 @@ jobs:
         run: |
           echo "🧹 Final cleanup..."
           export COMPOSE_PROJECT_NAME=journiv-${{ matrix.database }}
+          if [ "${{ matrix.database }}" = "postgres" ]; then
+            COMPOSE_FILE="docker-compose.yml"
+          else
+            COMPOSE_FILE="docker-compose.${{ matrix.database }}.yml"
+          fi
           APP_VERSION=latest docker compose \
-            -f docker-compose.prod.${{ matrix.database }}.yml \
+            -f $COMPOSE_FILE \
             -f docker-compose.override.ci.yml \
             down -v || true
 

@@ -13,8 +13,6 @@ Journiv is a self-hosted private journal. It features comprehensive journaling c
   </a>
 </p> -->
 
-
-
 <p align="center">
   <a href="https://journiv.com" target="_blank">
     <img src="https://img.shields.io/badge/Visit%20Website-405DE6?style=for-the-badge&logo=google-chrome&logoColor=white" alt="Visit Journiv Website">
@@ -47,9 +45,12 @@ Journiv is a self-hosted private journal. It features comprehensive journaling c
     preload="metadata">
   </video>
 </div> -->
+
+
 <div align="center">
   <a href="https://www.youtube.com/watch?v=nKoUh7VP-eE" target="_blank">
-    <img src="https://github.com/user-attachments/assets/d5c9e87d-83e1-4e99-8491-d44ea61fbecc" height="400">
+    <img height="400" alt="Journiv_Web_Tab_Mobile" src="https://github.com/user-attachments/assets/de613e87-a103-4935-a7ff-78013cba0e00" />
+    <!-- <img src="https://github.com/user-attachments/assets/d5c9e87d-83e1-4e99-8491-d44ea61fbecc" height="400"> -->
   </a>
   <!-- &nbsp;&nbsp;&nbsp;
   <a href="https://www.youtube.com/shorts/-cRwaPKltvQ" target="_blank">
@@ -80,6 +81,12 @@ docker run -d \
 **Access Journiv:** Open `http://192.168.1.1:8000` (replace with your server IP) in your browser to start journaling!
 
 **For complete installation guide see [installation guide](https://journiv.com/docs/installation).**
+
+## Demo
+Want to just try a [demo](https://demo.almostadatacenter.com)? 
+(Thanks to [JasonFieldz](https://github.com/JasonFieldz) for hosting a demo instance). 
+- Username: demo@test.com 
+- Password: Demo1234
 
 ## Documentation
 
