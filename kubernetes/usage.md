@@ -125,7 +125,7 @@ $ az network dns record-set a add-record -g myresourcegroup -z example.com -a 75
 
 Google's CloudDNS might use
 ```
-$ gcloud dns record-sets update journivv --rrdatas=75.72.233.202 --type=A --ttl=300 --zone="mydnszone" --project=mygcpproject
+$ gcloud dns record-sets update journiv --rrdatas=75.72.233.202 --type=A --ttl=300 --zone="mydnszone" --project=mygcpproject
 ```
 
 ### AWS 
