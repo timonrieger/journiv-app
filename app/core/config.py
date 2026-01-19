@@ -131,6 +131,10 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 100
     allowed_media_types: Optional[List[str]] = None
     allowed_file_extensions: Optional[List[str]] = None
+    media_signed_url_ttl_seconds: int = 120  # For images and general media
+    media_signed_url_video_ttl_seconds: int = 120  # 2 minutes for videos (same as images)
+    media_thumbnail_signed_url_ttl_seconds: int = 120
+    media_signed_url_grace_seconds: int = 60
 
     # File Processing Timeouts
     ffprobe_timeout: int = 300  # 5 minutes for video metadata extraction
@@ -614,6 +618,29 @@ class Settings(BaseSettings):
             raise ValueError("Timeout must be positive")
         if v > 3600:  # 1 hour max
             raise ValueError("Timeout cannot exceed 3600 seconds (1 hour)")
+        return v
+
+    @field_validator('media_signed_url_grace_seconds')
+    @classmethod
+    def validate_grace_period(cls, v: int, info: ValidationInfo) -> int:
+        """Validate grace period is reasonable."""
+        if v < 0:
+            raise ValueError("Grace period must be non-negative")
+        if v > 300:  # 5 minutes max
+            raise ValueError("Grace period cannot exceed 300 seconds (5 minutes)")
+
+        # Validate grace period is shorter than all media TTLs
+        ttl = info.data.get('media_signed_url_ttl_seconds', 120)
+        video_ttl = info.data.get('media_signed_url_video_ttl_seconds', 120)
+        thumb_ttl = info.data.get('media_thumbnail_signed_url_ttl_seconds', 120)
+
+        min_ttl = min(ttl, video_ttl, thumb_ttl)
+
+        if v >= min_ttl:
+            raise ValueError(
+                f"Grace period ({v}s) must be shorter than the minimum media TTL ({min_ttl}s)"
+            )
+
         return v
 
     @field_validator('celery_broker_url', 'celery_result_backend')

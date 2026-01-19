@@ -48,7 +48,7 @@ def test_media_upload_fetch_and_delete(
     assert "deleted" in deleted["message"].lower()
 
     missing = api_client.request(
-        "GET", f"/media/{media_id}", token=api_user.access_token
+        "GET", f"/media/{media_id}/sign", token=api_user.access_token, expected=(404,)
     )
     assert missing.status_code == 404
 
@@ -79,11 +79,21 @@ def test_media_download_supports_range(
     entry = entry_factory()
     uploaded = _upload_sample_media(api_client, api_user.access_token, entry["id"])
 
-    response = api_client.request(
-        "GET",
-        f"/media/{uploaded['id']}",
-        token=api_user.access_token,
-        headers={"Range": "bytes=0-9"},
+    # Wait for media processing to complete
+    api_client.wait_for_media_ready(api_user.access_token, uploaded["id"])
+
+    # Get signed URL first
+    sign_response = api_client.request(
+        "GET", f"/media/{uploaded['id']}/sign", token=api_user.access_token
+    ).json()
+    signed_url = sign_response["signed_url"]
+
+    # Use underlying client to fetch signed URL with Range header
+    # Prepend service root to make it absolute
+    full_url = f"{api_client._service_root}{signed_url}"
+    response = api_client._client.get(
+        full_url,
+        headers={"Range": "bytes=0-9"}
     )
     assert response.status_code == 206
     assert response.headers["content-range"].startswith("bytes 0-9/")
@@ -142,7 +152,7 @@ def test_media_get_and_delete_require_auth(
     assert_requires_authentication(
         api_client,
         [
-            EndpointCase("GET", f"/media/{uploaded['id']}"),
+            EndpointCase("GET", f"/media/{uploaded['id']}/sign"),
             EndpointCase("DELETE", f"/media/{uploaded['id']}"),
         ],
     )
@@ -191,16 +201,14 @@ def test_shared_media_deletion_preserves_file_with_references(
     )
     assert delete_entry_a.status_code in (200, 204), "Entry deletion should succeed"
 
-    # Verify media_a DB record is deleted
+    # Verify media_a DB record is deleted (check via sign endpoint)
     missing_media_a = api_client.request(
-        "GET", f"/media/{media_a['id']}", token=api_user.access_token
+        "GET", f"/media/{media_a['id']}/sign", token=api_user.access_token, expected=(404,)
     )
     assert missing_media_a.status_code == 404, "Media A record should be deleted"
 
     # CRITICAL: Verify media_b is STILL accessible (physical file preserved due to reference counting)
-    download_b_after_a_deleted = api_client.request(
-        "GET", f"/media/{media_b['id']}", token=api_user.access_token
-    )
+    download_b_after_a_deleted = api_client.get_media(api_user.access_token, media_b["id"])
     assert download_b_after_a_deleted.status_code == 200, (
         "Media B should still be accessible after Entry A deletion because the physical file "
         "is shared and Entry B still references it"
@@ -219,7 +227,7 @@ def test_shared_media_deletion_preserves_file_with_references(
 
     # Verify media_b DB record is deleted
     missing_media_b = api_client.request(
-        "GET", f"/media/{media_b['id']}", token=api_user.access_token
+        "GET", f"/media/{media_b['id']}/sign", token=api_user.access_token, expected=(404,)
     )
     assert missing_media_b.status_code == 404, "Media B record should be deleted"
 
@@ -254,9 +262,7 @@ def test_shared_media_deletion_via_media_endpoint(
     assert delete_media_a.status_code == 200
 
     # Verify media_b is STILL accessible
-    download_b = api_client.request(
-        "GET", f"/media/{media_b['id']}", token=api_user.access_token
-    )
+    download_b = api_client.get_media(api_user.access_token, media_b["id"])
     assert download_b.status_code == 200, (
         "Media B should still be accessible after deleting Media A "
         "because they share the same physical file"
@@ -272,7 +278,7 @@ def test_shared_media_deletion_via_media_endpoint(
 
     # Now both should be gone
     missing_media_b = api_client.request(
-        "GET", f"/media/{media_b['id']}", token=api_user.access_token
+        "GET", f"/media/{media_b['id']}/sign", token=api_user.access_token, expected=(404,)
     )
     assert missing_media_b.status_code == 404
 
@@ -333,7 +339,7 @@ def test_duplicate_media_upload_same_entry(
     assert media_count == 1, (
         f"Entry should have exactly 1 media record, but found {media_count}"
     )
-    
+
     # Verify the media ID matches what was returned from upload
     assert entry_media[0]["id"] == first_upload["id"], (
         "Media ID in entry media list should match the uploaded media ID"

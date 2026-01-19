@@ -98,3 +98,97 @@ def generate_canonical_signature(
     ).hexdigest()
 
     return signature
+
+
+def generate_media_signature(
+    media_type: str,
+    variant: str,
+    media_id: str,
+    user_id: str,
+    expires_at: int,
+    secret: str,
+) -> str:
+    """
+    Generate a short-lived HMAC signature for media access.
+
+    Args:
+        media_type: Type of media ("journiv" or "immich")
+        variant: Variant type ("original" or "thumbnail")
+        media_id: Media/asset identifier
+        user_id: User identifier
+        expires_at: Expiration timestamp (Unix epoch seconds)
+        secret: Secret key for HMAC
+
+    Returns:
+        Hex-encoded HMAC-SHA256 signature
+
+    Raises:
+        ValueError: If any parameter is empty or invalid
+    """
+    # Validate inputs
+    if not media_type or not media_type.strip():
+        raise ValueError("media_type cannot be empty")
+    if not variant or not variant.strip():
+        raise ValueError("variant cannot be empty")
+    if not media_id or not str(media_id).strip():
+        raise ValueError("media_id cannot be empty")
+    if not user_id or not str(user_id).strip():
+        raise ValueError("user_id cannot be empty")
+    if not secret or not secret.strip():
+        raise ValueError("secret cannot be empty")
+
+    # Prevent delimiter injection - reject values containing ":" delimiter
+    if ":" in media_type:
+        raise ValueError("media_type cannot contain ':'")
+    if ":" in variant:
+        raise ValueError("variant cannot contain ':'")
+    if ":" in str(media_id):
+        raise ValueError("media_id cannot contain ':'")
+    if ":" in str(user_id):
+        raise ValueError("user_id cannot contain ':'")
+
+    message = f"JOURNIV-MEDIA-V1:{media_type}:{variant}:{media_id}:{user_id}:{expires_at}"
+    return hmac.new(
+        secret.encode("utf-8"),
+        message.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+
+
+def verify_media_signature(
+    media_type: str,
+    variant: str,
+    media_id: str,
+    user_id: str,
+    expires_at: int,
+    signature: str,
+    secret: str,
+) -> bool:
+    """
+    Verify a media signature using constant-time comparison.
+
+    Args:
+        media_type: Type of media ("journiv" or "immich")
+        variant: Variant type ("original" or "thumbnail")
+        media_id: Media/asset identifier
+        user_id: User identifier
+        expires_at: Expiration timestamp (Unix epoch seconds)
+        signature: Signature to verify
+        secret: Secret key for HMAC
+
+    Returns:
+        True if signature is valid, False otherwise
+    """
+    try:
+        expected = generate_media_signature(
+            media_type,
+            variant,
+            media_id,
+            user_id,
+            expires_at,
+            secret,
+        )
+        return hmac.compare_digest(expected, signature)
+    except (ValueError, TypeError):
+        # Invalid parameters result in failed verification
+        return False

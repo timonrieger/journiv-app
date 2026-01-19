@@ -46,7 +46,10 @@ class MediaDTO(BaseModel):
     # Additional metadata
     file_metadata: Optional[str] = Field(None, description="JSON metadata string")
     thumbnail_path: Optional[str] = Field(None, description="Path to thumbnail")
-    upload_status: str = Field(default="completed", description="Upload status: pending, processing, completed, failed")
+    upload_status: str = Field(
+        default="completed",
+        description="Upload status: pending, processing, completed, failed"
+    )
 
     # Timestamps (inherited from BaseModel)
     created_at: datetime = Field(..., description="Media creation time in UTC")

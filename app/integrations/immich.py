@@ -6,15 +6,18 @@ and syncing photo/video metadata.
 
 API Documentation: https://api.immich.app/introduction
 """
-from datetime import datetime
+from datetime import datetime, timezone
+import time
+from urllib.parse import urlencode
 from inspect import isawaitable
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 
 import httpx
 from sqlmodel import Session
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.config import settings
+from app.core.media_signing import build_signed_query
 from app.core.encryption import decrypt_token
 from app.core.time_utils import utc_now
 from app.core.logging_config import log_info, log_error, log_warning
@@ -139,7 +142,7 @@ async def list_assets(
             if len(assets_data) >= end:
                 log_info(f"Returning cached Immich assets for user {user.id} (page {page}, limit {limit})")
                 return [
-                    _normalize_immich_asset(asset, integration.provider)
+                    _normalize_immich_asset(asset, integration.provider, str(user.id))
                     for asset in assets_data[start:end]
                 ]
 
@@ -158,7 +161,8 @@ async def list_assets(
             },
             json={
                 "page": page,
-                "size": limit
+                "size": limit,
+                "order": "desc",
             },
         )
         response.raise_for_status()
@@ -175,7 +179,7 @@ async def list_assets(
         # Normalize and optionally cache
         normalized_assets = []
         for asset_data in assets_data:
-            normalized = _normalize_immich_asset(asset_data, integration.provider)
+            normalized = _normalize_immich_asset(asset_data, integration.provider, str(user.id))
             normalized_assets.append(normalized)
 
         # Cache the asset metadata if present
@@ -236,7 +240,8 @@ async def sync(
             },
             json={
                 "page": 1,
-                "size": cache_limit
+                "size": cache_limit,
+                "order": "desc",
             },
         )
         response.raise_for_status()
@@ -307,7 +312,11 @@ def _save_to_cache(user_id: str, assets_data: List[Dict[str, Any]]) -> None:
         log_warning(e, f"Failed to save Immich assets to cache for user {user_id}: {e}")
 
 
-def _normalize_immich_asset(asset_data: Dict[str, Any], provider: IntegrationProvider) -> IntegrationAssetResponse:
+def _normalize_immich_asset(
+    asset_data: Dict[str, Any],
+    provider: Union[IntegrationProvider, str],
+    user_id: str,
+) -> IntegrationAssetResponse:
     """
     Convert Immich API asset data to normalized IntegrationAssetResponse.
 
@@ -328,24 +337,75 @@ def _normalize_immich_asset(asset_data: Dict[str, Any], provider: IntegrationPro
     # Title: prefer originalFileName, fall back to ID
     title = asset_data.get("originalFileName") or asset_data.get("originalPath") or f"Asset {asset_id[:8]}"
 
-    # taken_at: prefer exifInfo.dateTimeOriginal, fall back to createdAt
+    # taken_at: prefer localDateTime (user requested for timeline grouping),
+    # then exifInfo.dateTimeOriginal, fall back to createdAt
     exif_info = asset_data.get("exifInfo", {})
-    taken_at_str = exif_info.get("dateTimeOriginal") or asset_data.get("createdAt")
+    taken_at_str = (
+        asset_data.get("localDateTime") or
+        exif_info.get("dateTimeOriginal") or
+        asset_data.get("createdAt")
+    )
 
     # Parse taken_at datetime
     taken_at = None
     if taken_at_str:
         try:
-            taken_at = datetime.fromisoformat(taken_at_str.replace("Z", "+00:00"))
+            # Handle Z suffix if present, though localDateTime might not have it
+            clean_str = taken_at_str.replace("Z", "+00:00")
+            taken_at = datetime.fromisoformat(clean_str)
+            if taken_at.tzinfo is None:
+                taken_at = taken_at.replace(tzinfo=timezone.utc)
+            else:
+                taken_at = taken_at.astimezone(timezone.utc)
         except (ValueError, AttributeError) as e:
             log_warning(e, f"Failed to parse taken_at for asset {asset_id}: {taken_at_str}")
+
+    thumb_url = _build_signed_proxy_url(
+        provider=provider,
+        asset_id=asset_id,
+        user_id=user_id,
+        variant="thumbnail",
+        ttl_seconds=settings.media_thumbnail_signed_url_ttl_seconds,
+    )
+    # Use video-specific TTL if asset is a video
+    original_ttl = (
+        settings.media_signed_url_video_ttl_seconds
+        if asset_type == AssetType.VIDEO
+        else settings.media_signed_url_ttl_seconds
+    )
+
+    original_url = _build_signed_proxy_url(
+        provider=provider,
+        asset_id=asset_id,
+        user_id=user_id,
+        variant="original",
+        ttl_seconds=original_ttl,
+    )
 
     return IntegrationAssetResponse(
         id=asset_id,
         type=asset_type,
         title=title,
         taken_at=taken_at,
-        thumb_url=f"/api/v1/integrations/{provider}/proxy/{asset_id}/thumbnail"
+        thumb_url=thumb_url,
+        original_url=original_url,
+    )
+
+
+def _build_signed_proxy_url(
+    provider: Union[IntegrationProvider, str],
+    asset_id: str,
+    user_id: str,
+    variant: str,
+    ttl_seconds: int,
+) -> str:
+    # Handle both enum and string types for provider
+    provider_value = provider.value if isinstance(provider, IntegrationProvider) else provider
+    expires_at = int(time.time()) + ttl_seconds
+    query = build_signed_query(provider_value, variant, asset_id, str(user_id), expires_at)
+    return (
+        f"/api/v1/integrations/{provider_value}/proxy/{asset_id}/{variant}"
+        f"?{urlencode(query)}"
     )
 
 

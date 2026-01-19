@@ -16,13 +16,14 @@ Authentication:
 - Users can only access their own integrations
 """
 from datetime import datetime, timezone
+import uuid
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Header
 from starlette.background import BackgroundTask
 from sqlmodel import Session, select
 
-from app.core.database import get_session
+from app.core.database import get_session, get_session_context
 from app.models.integration import Integration, IntegrationProvider  # Needed for proxy queries below.
 from app.integrations.schemas import (
     IntegrationConnectRequest,
@@ -31,15 +32,17 @@ from app.integrations.schemas import (
     IntegrationAssetsListResponse,
     IntegrationSettingsUpdateRequest,
 )
-from app.api.dependencies import get_current_user, get_current_user_detached
+from app.api.dependencies import get_current_user
 from app.core.config import settings
-from app.core.scoped_cache import ScopedCache
+from app.core.media_signing import is_signature_expired
+from app.core.signing import verify_media_signature
 from app.integrations.service import (
     connect_integration,
     get_integration_status,
     disconnect_integration,
     list_integration_assets,
     update_integration_settings,
+    fetch_proxy_asset,
 )
 from app.core.celery_app import celery_app
 from app.models.user import User
@@ -48,31 +51,6 @@ import httpx
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
-
-_proxy_client: Optional[httpx.AsyncClient] = None
-_proxy_timeout = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
-_proxy_limits = httpx.Limits(max_connections=50, max_keepalive_connections=20)
-
-
-def _get_proxy_client() -> httpx.AsyncClient:
-    """Reuse a single client to avoid connection churn under thumbnail bursts."""
-    global _proxy_client
-    if _proxy_client is None:
-        _proxy_client = httpx.AsyncClient(
-            verify=True,
-            follow_redirects=True,
-            timeout=_proxy_timeout,
-            limits=_proxy_limits,
-            transport=httpx.AsyncHTTPTransport(retries=2),
-        )
-    return _proxy_client
-
-
-def _get_integration_cache() -> Optional[ScopedCache]:
-    """Get the scoped cache for integration credentials."""
-    if not settings.redis_url:
-        return None
-    return ScopedCache(namespace="integration_creds")
 
 
 async def _close_httpx_stream(response: httpx.Response) -> None:
@@ -184,10 +162,7 @@ async def disconnect(
             user=current_user,
             provider=provider
         )
-        # Invalidate cache
-        cache = _get_integration_cache()
-        if cache:
-            cache.delete(scope_id=str(current_user.id), cache_type=f"{provider.value}")
+        # Cache invalidation is handled in the service
     except ValueError as e:
         log_warning(f"Integration not found for disconnect: {e}")
         raise HTTPException(
@@ -392,7 +367,9 @@ async def trigger_sync(
 async def proxy_thumbnail(
     provider: IntegrationProvider,
     asset_id: str,
-    current_user: Annotated[User, Depends(get_current_user_detached)],
+    uid: Annotated[str, Query(alias="uid")],
+    exp: Annotated[int, Query(alias="exp")],
+    sig: Annotated[str, Query(alias="sig")],
 ):
     """
     Proxy an asset's thumbnail from the provider.
@@ -401,155 +378,93 @@ async def proxy_thumbnail(
     and caching.
     """
     from fastapi.responses import StreamingResponse
-    from app.core.encryption import decrypt_token
     from app.core.database import get_session_context
+    try:
+        user_id = uuid.UUID(uid)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid signature")
+    if is_signature_expired(exp, settings.media_signed_url_grace_seconds):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Signed URL expired")
+    if not verify_media_signature(
+        provider.value,
+        "thumbnail",
+        asset_id,
+        str(user_id),
+        exp,
+        sig,
+        settings.secret_key,
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid signature")
 
-    integration_base_url = None
-    access_token_encrypted = None
-
-    # 1. Try Cache First
-    cache = _get_integration_cache()
-    if cache:
-        cached_creds = cache.get(scope_id=str(current_user.id), cache_type=f"{provider.value}")
-        if cached_creds and cached_creds.get("is_active"):
-            integration_base_url = cached_creds.get("base_url")
-            access_token_encrypted = cached_creds.get("token")
-
-    # 2. If not in cache, fetch from DB
-    if not integration_base_url or not access_token_encrypted:
+    # 1. Fetch asset stream using service
+    try:
         with get_session_context() as session:
-            # Get user's integration
-            integration = session.exec(
-                select(Integration)
-                .where(Integration.user_id == current_user.id)
-                .where(Integration.provider == provider)
-            ).first()
-
-            if not integration:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"{provider} integration not found. Please connect first."
-                )
-
-            if not integration.is_active:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"{provider} integration is disabled. Please reconnect."
-                )
-
-            # EXTRACT DATA eagerly before session closes
-            integration_base_url = integration.base_url
-            access_token_encrypted = integration.access_token_encrypted
-
-        # 3. Populate Cache
-        if cache:
-            cache.set(
-                scope_id=str(current_user.id),
-                cache_type=f"{provider.value}",
-                value={
-                    "base_url": integration_base_url,
-                    "token": access_token_encrypted,
-                    "is_active": True
-                },
-                ttl_seconds=300 # Cache for 5 minutes
+            response = await fetch_proxy_asset(
+                session=session,
+                user_id=user_id,
+                provider=provider,
+                asset_id=asset_id,
+                variant="thumbnail",
             )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        log_error(f"Proxy thumbnail failed: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to fetch thumbnail")
 
-    # Session is CLOSED here. Connection returned to pool.
+    # Handle provider errors
+    if response.status_code in (401, 403):
+        log_warning(f"Invalid {provider} token for user {user_id}")
+        # We need a new session to update the error state since the main one is closed
+        try:
+            with get_session_context() as params_session:
+                # Re-fetch for update
+                integration_update = params_session.exec(
+                        select(Integration)
+                    .where(Integration.user_id == user_id)
+                    .where(Integration.provider == provider)
+                ).first()
+                if integration_update:
+                    integration_update.last_error = "Authentication failed"
+                    integration_update.last_error_at = datetime.now(timezone.utc)
+                    params_session.add(integration_update)
+                    params_session.commit()
+        except Exception as e:
+            log_error(f"Failed to update integration error state: {e}")
+
+        await _close_httpx_stream(response)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"{provider} authentication failed. Please reconnect your integration."
+        )
+
+    if response.status_code == 404:
+        await _close_httpx_stream(response)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Asset {asset_id} not found in {provider}"
+        )
 
     try:
-        # Decrypt token
-        api_key = decrypt_token(access_token_encrypted)
-
-        # Build provider-specific thumbnail URL
-        if provider == IntegrationProvider.IMMICH:
-            # Validate asset_id to prevent path traversal
-            import re
-            if not re.match(r'^[a-zA-Z0-9_-]+$', asset_id):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid asset ID format"
-                )
-            thumbnail_url = f"{integration_base_url}/api/assets/{asset_id}/thumbnail"
-        else:
-            # Future: Add other providers
-            raise HTTPException(
-                status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                detail=f"Thumbnail proxy not implemented for {provider}"
-            )
-
-        client = _get_proxy_client()
-        try:
-            request = client.build_request(
-                "GET",
-                thumbnail_url,
-                headers={"x-api-key": api_key}
-            )
-            response = await client.send(request, stream=True)
-        except Exception:
-            raise
-
-        # Handle provider errors
-        if response.status_code in (401, 403):
-            log_warning(f"Invalid {provider} token for user {current_user.id}")
-            # We need a new session to update the error state since the main one is closed
-            try:
-                with get_session_context() as params_session:
-                    # Re-fetch for update
-                    integration_update = params_session.exec(
-                         select(Integration)
-                        .where(Integration.user_id == current_user.id)
-                        .where(Integration.provider == provider)
-                    ).first()
-                    if integration_update:
-                        integration_update.last_error = "Authentication failed"
-                        integration_update.last_error_at = datetime.now(timezone.utc)
-                        params_session.add(integration_update)
-                        params_session.commit()
-            except Exception as e:
-                log_error(f"Failed to update integration error state: {e}")
-
-            await _close_httpx_stream(response)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"{provider} authentication failed. Please reconnect your integration."
-            )
-
-        if response.status_code == 404:
-            await _close_httpx_stream(response)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Asset {asset_id} not found in {provider}"
-            )
-
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            await _close_httpx_stream(response)
-            detail = f"{provider} provider error"
-            raise HTTPException(
-                status_code=e.response.status_code,
-                detail=detail
-            )
-
-        # Stream the thumbnail to the client without buffering entire file in memory
-        return StreamingResponse(
-            response.aiter_bytes(),
-            media_type=response.headers.get("content-type", "image/jpeg"),
-            headers={
-                "Cache-Control": "public, max-age=3600",
-                "X-Provider": provider.value
-            },
-            background=BackgroundTask(_close_httpx_stream, response)
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        log_error(e)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        await _close_httpx_stream(response)
+        detail = f"{provider} provider error"
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch thumbnail from {provider}"
+            status_code=e.response.status_code,
+            detail=detail
         )
+
+    # Stream the thumbnail to the client without buffering entire file in memory
+    return StreamingResponse(
+        response.aiter_bytes(),
+        media_type=response.headers.get("content-type", "image/jpeg"),
+        headers={
+            "Cache-Control": "public, max-age=3600",
+            "X-Provider": provider.value
+        },
+        background=BackgroundTask(_close_httpx_stream, response)
+    )
 
 
 @router.get(
@@ -566,8 +481,9 @@ async def proxy_thumbnail(
 async def proxy_original(
     provider: IntegrationProvider,
     asset_id: str,
-    request: Request,
-    current_user: Annotated[User, Depends(get_current_user_detached)],
+    uid: Annotated[str, Query(alias="uid")],
+    exp: Annotated[int, Query(alias="exp")],
+    sig: Annotated[str, Query(alias="sig")],
     range_header: Annotated[Optional[str], Header(alias="Range")] = None
 ):
     """
@@ -576,180 +492,122 @@ async def proxy_original(
     Supports Range requests for video streaming and seeking.
     """
     from fastapi.responses import StreamingResponse
-    from app.core.encryption import decrypt_token
     from app.core.database import get_session_context
 
-    integration_base_url = None
-    access_token_encrypted = None
-
     try:
-        # 1. Try Cache First
-        cache = _get_integration_cache()
-        if cache:
-            cached_creds = cache.get(scope_id=current_user.id, cache_type=f"{provider.value}")
-            if cached_creds and cached_creds.get("is_active"):
-                integration_base_url = cached_creds.get("base_url")
-                access_token_encrypted = cached_creds.get("token")
+        user_id = uuid.UUID(uid)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid signature")
+    if is_signature_expired(exp, settings.media_signed_url_grace_seconds):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Signed URL expired")
+    if not verify_media_signature(
+        provider.value,
+        "original",
+        asset_id,
+        str(user_id),
+        exp,
+        sig,
+        settings.secret_key,
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid signature")
 
-        # 2. If not in cache, fetch from DB
-        if not integration_base_url or not access_token_encrypted:
-            with get_session_context() as session:
-                # Get user's integration
-                integration = session.exec(
-                    select(Integration)
-                    .where(Integration.user_id == current_user.id)
-                    .where(Integration.provider == provider)
-                ).first()
-
-                if not integration:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"{provider} integration not found. Please connect first."
-                    )
-
-                if not integration.is_active:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"{provider} integration is disabled. Please reconnect."
-                    )
-
-                # EXTRACT DATA eagerly before session closes
-                integration_base_url = integration.base_url
-                access_token_encrypted = integration.access_token_encrypted
-
-            # 3. Populate Cache
-            if cache:
-                cache.set(
-                    scope_id=current_user.id,
-                    cache_type=f"{provider.value}",
-                    value={
-                        "base_url": integration_base_url,
-                        "token": access_token_encrypted,
-                        "is_active": True
-                    },
-                    ttl_seconds=300 # Cache for 5 minutes
-                )
-
-        # Session is CLOSED here. Connection returned to pool.
-
-        # Decrypt token
-        api_key = decrypt_token(access_token_encrypted)
-
-        # Build provider-specific original URL
-        if provider == IntegrationProvider.IMMICH:
-            # Validate asset_id to prevent path traversal
-            import re
-            if not re.match(r'^[a-zA-Z0-9_-]+$', asset_id):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Invalid asset ID format"
-                )
-            original_url = f"{integration_base_url}/api/assets/{asset_id}/original"
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                detail=f"Original proxy not implemented for {provider}"
+    # 1. Fetch asset stream using service
+    try:
+        with get_session_context() as session:
+            response = await fetch_proxy_asset(
+                session=session,
+                user_id=user_id,
+                provider=provider,
+                asset_id=asset_id,
+                variant="original",
+                range_header=range_header,
             )
-
-        # Prepare headers for Immich request
-        headers = {"x-api-key": api_key}
-        if range_header:
-            headers["Range"] = range_header
-
-        client = _get_proxy_client()
-        try:
-            proxied_request = client.build_request(
-                "GET",
-                original_url,
-                headers=headers
-            )
-            response = await client.send(proxied_request, stream=True)
-        except Exception:
-            raise
-
-        # Handle provider errors
-        if response.status_code in (401, 403):
-            log_warning(f"Invalid {provider} token for user {current_user.id}")
-
-            # Update error state in new session
-            try:
-                with get_session_context() as params_session:
-                    integration_update = params_session.exec(
-                         select(Integration)
-                        .where(Integration.user_id == current_user.id)
-                        .where(Integration.provider == provider)
-                    ).first()
-                    if integration_update:
-                        integration_update.last_error = "Authentication failed"
-                        integration_update.last_error_at = datetime.now(timezone.utc)
-                        params_session.add(integration_update)
-                        params_session.commit()
-            except Exception as e:
-                log_error(f"Failed to update integration error state: {e}")
-
-            await _close_httpx_stream(response)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"{provider} authentication failed. Please reconnect your integration."
-            )
-
-        if response.status_code == 404:
-            await _close_httpx_stream(response)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Asset {asset_id} not found in {provider}"
-            )
-
-        if response.status_code == 416:
-            await _close_httpx_stream(response)
-            raise HTTPException(
-                status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
-                detail="Range Not Satisfiable"
-            )
-
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            await _close_httpx_stream(response)
-            raise HTTPException(
-                status_code=e.response.status_code,
-                detail=f"{provider} provider error"
-            )
-
-        response_headers = {
-            "Cache-Control": "public, max-age=3600",
-            "X-Provider": provider.value,
-        }
-
-        if "content-range" in response.headers:
-            response_headers["Content-Range"] = response.headers["content-range"]
-        if "accept-ranges" in response.headers:
-            response_headers["Accept-Ranges"] = response.headers["accept-ranges"]
-        if "content-length" in response.headers:
-            response_headers["Content-Length"] = response.headers["content-length"]
-
-        status_code = (
-            status.HTTP_206_PARTIAL_CONTENT
-            if response.status_code == 206
-            else status.HTTP_200_OK
-        )
-
-        return StreamingResponse(
-            response.aiter_bytes(),
-            status_code=status_code,
-            media_type=response.headers.get("content-type", "application/octet-stream"),
-            headers=response_headers,
-            background=BackgroundTask(_close_httpx_stream, response)
-        )
-
-    except HTTPException:
-        raise
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
-        log_error(e)
+        log_error(f"Proxy original failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch original file from {provider}"
+            detail="Failed to fetch original file",
         )
+
+
+    # Handle provider errors
+    if response.status_code in (401, 403):
+        log_warning(f"Invalid {provider} token for user {user_id}")
+
+        # Update error state in new session
+        try:
+            with get_session_context() as params_session:
+                integration_update = params_session.exec(
+                     select(Integration)
+                    .where(Integration.user_id == user_id)
+                    .where(Integration.provider == provider)
+                ).first()
+                if integration_update:
+                    integration_update.last_error = "Authentication failed"
+                    integration_update.last_error_at = datetime.now(timezone.utc)
+                    params_session.add(integration_update)
+                    params_session.commit()
+        except Exception as e:
+            log_error(f"Failed to update integration error state: {e}")
+
+        await _close_httpx_stream(response)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"{provider} authentication failed. Please reconnect your integration."
+        )
+
+    if response.status_code == 404:
+        await _close_httpx_stream(response)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Asset {asset_id} not found in {provider}"
+        )
+
+    if response.status_code == 416:
+        await _close_httpx_stream(response)
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            detail="Range Not Satisfiable"
+        )
+
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        await _close_httpx_stream(response)
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"{provider} provider error"
+        )
+
+    response_headers = {
+        "Cache-Control": "public, max-age=3600",
+        "X-Provider": provider.value,
+    }
+
+    if "content-range" in response.headers:
+        response_headers["Content-Range"] = response.headers["content-range"]
+    if "accept-ranges" in response.headers:
+        response_headers["Accept-Ranges"] = response.headers["accept-ranges"]
+    if "content-length" in response.headers:
+        response_headers["Content-Length"] = response.headers["content-length"]
+
+    status_code = (
+        status.HTTP_206_PARTIAL_CONTENT
+        if response.status_code == 206
+        else status.HTTP_200_OK
+    )
+
+    return StreamingResponse(
+        response.aiter_bytes(),
+        status_code=status_code,
+        media_type=response.headers.get("content-type", "application/octet-stream"),
+        headers=response_headers,
+        background=BackgroundTask(_close_httpx_stream, response)
+    )
+
+
 
 # TODO Future: Add admin endpoint to trigger batch sync
 # @router.post("/admin/sync-all")

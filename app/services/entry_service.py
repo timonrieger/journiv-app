@@ -15,7 +15,7 @@ from app.core.time_utils import utc_now, local_date_for_user, ensure_utc, to_utc
 from app.models.entry import Entry, EntryMedia
 from app.models.entry_tag_link import EntryTagLink
 from app.models.journal import Journal
-from app.schemas.entry import EntryCreate, EntryUpdate, EntryMediaCreate
+from app.schemas.entry import EntryCreate, EntryUpdate, EntryMediaCreate, EntryMediaCreateRequest
 
 DEFAULT_ENTRY_PAGE_LIMIT = 50
 MAX_ENTRY_PAGE_LIMIT = 100
@@ -471,7 +471,12 @@ class EntryService:
         statement = statement.order_by(Entry.entry_datetime_utc.desc())
         return list(self.session.exec(statement))
 
-    def add_media_to_entry(self, entry_id: uuid.UUID, user_id: uuid.UUID, media_data: EntryMediaCreate) -> EntryMedia:
+    def add_media_to_entry(
+        self,
+        entry_id: uuid.UUID,
+        user_id: uuid.UUID,
+        media_data: EntryMediaCreate | EntryMediaCreateRequest
+    ) -> EntryMedia:
         """Add media to an entry."""
         # Verify the entry belongs to the user
         self._get_owned_entry(entry_id, user_id)
@@ -491,11 +496,11 @@ class EntryService:
             upload_status=media_data.upload_status,
             file_metadata=media_data.file_metadata,
             checksum=media_data.checksum,
-            external_provider=media_data.external_provider,
-            external_asset_id=media_data.external_asset_id,
-            external_url=media_data.external_url,
-            external_created_at=media_data.external_created_at,
-            external_metadata=media_data.external_metadata,
+            external_provider=getattr(media_data, "external_provider", None),
+            external_asset_id=getattr(media_data, "external_asset_id", None),
+            external_url=getattr(media_data, "external_url", None),
+            external_created_at=getattr(media_data, "external_created_at", None),
+            external_metadata=getattr(media_data, "external_metadata", None),
         )
 
         try:

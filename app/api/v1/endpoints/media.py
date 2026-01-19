@@ -5,14 +5,20 @@ import inspect
 import logging
 import uuid
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Optional, AsyncGenerator
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Header
+import aiofiles
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Header, Query
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlmodel import Session, select
+from sqlmodel import Session
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user, get_current_user_detached
 from app.core import database as database_module
+from app.core.config import settings
+from app.core.media_signing import (
+    attach_signed_urls,
+    is_signature_expired,
+)
 from app.core.exceptions import (
     MediaNotFoundError,
     EntryNotFoundError,
@@ -20,7 +26,9 @@ from app.core.exceptions import (
     InvalidFileTypeError,
     FileValidationError
 )
+from app.core.signing import verify_media_signature
 from app.core.logging_config import LogCategory
+from app.models.enums import UploadStatus
 from app.models.user import User
 from app.schemas.entry import EntryMediaResponse
 from app.services import entry_service as entry_service_module
@@ -29,9 +37,20 @@ from app.services.import_job_service import ImportJobService
 from app.schemas.media import (
     ImmichImportRequest,
     ImmichImportStartResponse,
-    ImmichImportJobResponse
+    ImmichImportJobResponse,
+    MediaSignedUrlResponse,
+    MediaBatchSignRequest,
+    MediaBatchSignResponse,
+    MediaBatchSignItem,
 )
 from app.core.celery_app import celery_app
+from app.integrations.service import fetch_proxy_asset
+import httpx
+from starlette.background import BackgroundTask
+
+async def _close_httpx_stream(response: httpx.Response) -> None:
+    """Ensure streamed HTTP responses release network resources."""
+    await response.aclose()
 
 file_logger = logging.getLogger(LogCategory.FILE_UPLOADS.value)
 error_logger = logging.getLogger(LogCategory.ERRORS.value)
@@ -57,18 +76,113 @@ def _get_entry_service(session: Session):
     return entry_service_module.EntryService(session)
 
 
-def _send_bytes_range_requests(file_path: Path, start: int, end: int):
-    """Generator function to send file bytes in range for streaming."""
-    with open(file_path, "rb") as f:
-        f.seek(start)
+def _handle_batch_sign_errors(batch_response: MediaBatchSignResponse) -> None:
+    """
+    Handle errors from batch_sign_media response.
+
+    Raises appropriate HTTPException based on error type.
+    Used by both sign_media_url and batch_sign_media endpoints.
+    """
+    if batch_response.errors:
+        error = batch_response.errors[0]
+        error_msg = error.error.lower()
+
+        # Map specific error messages to appropriate status codes
+        if "not found" in error_msg:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=error.error
+            )
+        elif "not active" in error_msg or "integration" in error_msg:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=error.error
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error.error
+            )
+
+    # Additional check for empty results
+    if not batch_response.results:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Media not found"
+        )
+
+
+async def _send_bytes_range_requests(file_path: Path, start: int, end: int) -> AsyncGenerator[bytes, None]:
+    """Async generator function to send file bytes in range for streaming."""
+    async with aiofiles.open(file_path, "rb") as f:
+        await f.seek(start)
         remaining = end - start + 1
         while remaining:
             chunk_size = min(8192, remaining)  # 8KB chunks
-            chunk = f.read(chunk_size)
+            chunk = await f.read(chunk_size)
             if not chunk:
                 break
             remaining -= len(chunk)
             yield chunk
+
+
+class SignedMediaRequest:
+    """Dependency for verifying signed media requests."""
+
+    def __init__(
+        self,
+        media_id: uuid.UUID,
+        uid: uuid.UUID,
+        exp: int,
+        sig: str,
+        media_type: str,
+        variant: str,
+    ):
+        self.media_id = media_id
+        self.uid = uid
+        self.exp = exp
+        self.sig = sig
+        self.media_type = media_type  # "journiv" or "immich"
+        self.variant = variant  # "original" or "thumbnail"
+
+
+def verify_signed_media_request(
+    media_id: uuid.UUID,
+    uid: uuid.UUID = Query(..., alias="uid"),
+    exp: int = Query(..., alias="exp"),
+    sig: str = Query(..., alias="sig"),
+    media_type: str = "journiv",
+    variant: str = "original",
+) -> SignedMediaRequest:
+    """
+    Dependency to verify signed media request parameters.
+
+    Validates signature and expiration for media access.
+
+    Raises:
+        HTTPException: If signature is invalid or expired
+    """
+    if is_signature_expired(exp, settings.media_signed_url_grace_seconds):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Signed URL expired"
+        )
+
+    if not verify_media_signature(
+        media_type,
+        variant,
+        str(media_id),
+        str(uid),
+        exp,
+        sig,
+        settings.secret_key,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid signature"
+        )
+
+    return SignedMediaRequest(media_id, uid, exp, sig, media_type, variant)
 
 
 
@@ -123,7 +237,12 @@ async def upload_media(
                     extra={"user_id": str(current_user.id), "media_id": str(media_record.id), "error": str(e)}
                 )
 
-        return EntryMediaResponse.model_validate(media_record)
+        response = EntryMediaResponse.model_validate(media_record)
+        return attach_signed_urls(
+            response,
+            str(current_user.id),
+            include_incomplete=True,
+        )
 
     except FileTooLargeError as e:
         raise HTTPException(
@@ -205,29 +324,181 @@ async def delete_media(
 
 
 @router.get(
-    "/{media_id}",
+    "/{media_id}/sign",
+    response_model=MediaSignedUrlResponse,
     responses={
         401: {"description": "Not authenticated"},
         403: {"description": "Account inactive or forbidden"},
         404: {"description": "Media not found"},
-        416: {"description": "Range Not Satisfiable"},
     }
 )
-async def get_media(
+async def sign_media_url(
     media_id: uuid.UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     session: Annotated[Session, Depends(_get_db_session)],
-    range_header: Optional[str] = Header(None, alias="range")
 ):
-    """Get media file by ID with proper Range request support for video streaming."""
+    """Generate a short-lived signed URL for media playback."""
+    media_service = _get_media_service()
+
+    # Use batch_sign_media for consistent signing logic
+    batch_request = MediaBatchSignRequest(
+        items=[MediaBatchSignItem(id=str(media_id), variant="original")]
+    )
+
+    batch_response = await media_service.batch_sign_media(
+        batch_request, current_user.id, session
+    )
+
+    _handle_batch_sign_errors(batch_response)
+
+    result = batch_response.results[0]
+    return MediaSignedUrlResponse(
+        signed_url=result.signed_url,
+        expires_at=result.expires_at
+    )
+
+
+@router.post(
+    "/batch-sign",
+    response_model=MediaBatchSignResponse,
+    responses={
+        400: {"description": "Invalid request"},
+        401: {"description": "Not authenticated"},
+        403: {"description": "Account inactive or forbidden"},
+    }
+)
+async def batch_sign_media(
+    request: MediaBatchSignRequest,
+    current_user: Annotated[User, Depends(get_current_user_detached)],
+):
+    """Batch sign media URLs for entry media IDs."""
     media_service = _get_media_service()
 
     try:
-        file_info = media_service.get_media_file_for_serving(
-            media_id, current_user.id, session, range_header
+        # Use database session context since we're called with get_current_user_detached
+        # batch_sign_media handles its own queries
+        with database_module.get_session_context() as session:
+            batch_response = await media_service.batch_sign_media(
+                request, current_user.id, session
+            )
+
+            # For batch endpoint, return the response with both results and errors
+            # This allows partial success - some items may succeed while others fail
+            return batch_response
+
+    except ValueError as e:
+        # Handle validation errors from the service layer
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        ) from None
+    except Exception as e:
+        # Handle unexpected errors
+        error_logger.error(
+            "Unexpected error batch signing media",
+            extra={"user_id": str(current_user.id), "error": str(e)},
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to sign media URLs"
         )
 
-        # Handle Range request
+
+@router.get(
+    "/{media_id}/signed",
+    name="get_media_signed",
+    responses={
+        403: {"description": "Invalid or expired signature"},
+        404: {"description": "Media not found"},
+        416: {"description": "Range Not Satisfiable"},
+    }
+)
+async def get_media_signed(
+    media_id: uuid.UUID,
+    uid: uuid.UUID = Query(..., alias="uid"),
+    exp: int = Query(..., alias="exp"),
+    sig: str = Query(..., alias="sig"),
+    range_header: Optional[str] = Header(None, alias="range")
+):
+    """Get media file by ID using a short-lived signed URL."""
+    if is_signature_expired(exp, settings.media_signed_url_grace_seconds):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Signed URL expired")
+    if not verify_media_signature(
+        "journiv",
+        "original",
+        str(media_id),
+        str(uid),
+        exp,
+        sig,
+        settings.secret_key,
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid signature")
+
+    media_service = _get_media_service()
+    try:
+        with database_module.get_session_context() as session:
+            # First fetch media record to check provider
+            media = media_service.get_media_by_id(media_id, uid, session)
+
+            # Handle Immich proxy (Unified Endpoint)
+            # Handle Immich proxy (Unified Endpoint)
+            if media.external_provider == "immich" and media.external_asset_id:
+                from app.models.integration import IntegrationProvider
+
+                try:
+                    response = await fetch_proxy_asset(
+                        session=session,
+                        user_id=uid,
+                        provider=IntegrationProvider.IMMICH,
+                        asset_id=media.external_asset_id,
+                        variant="original",
+                        range_header=range_header,
+                    )
+                except ValueError as e:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from None
+                except Exception as e:
+                    error_logger.exception(f"Proxy original failed: {e}")
+                    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to fetch original file") from e
+
+                if response.status_code in (401, 403, 404, 416):
+                    await _close_httpx_stream(response)
+                    # Map proxied status codes
+                    if response.status_code == 404:
+                         raise HTTPException(status_code=404, detail="Media not found")
+                    raise HTTPException(status_code=response.status_code, detail="Provider error")
+
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    await _close_httpx_stream(response)
+                    raise HTTPException(status_code=e.response.status_code, detail="Provider error")
+
+                # Forward headers
+                response_headers = {
+                    "Cache-Control": "public, max-age=3600",
+                    "X-Provider": "immich",
+                }
+                for header in ["Content-Range", "Accept-Ranges", "Content-Length"]:
+                    if header.lower() in response.headers:
+                        response_headers[header] = response.headers[header.lower()]
+
+                status_code = status.HTTP_206_PARTIAL_CONTENT if response.status_code == 206 else status.HTTP_200_OK
+
+                return StreamingResponse(
+                    response.aiter_bytes(),
+                    status_code=status_code,
+                    media_type=response.headers.get("content-type", "application/octet-stream"),
+                    headers=response_headers,
+                    background=BackgroundTask(_close_httpx_stream, response)
+                )
+
+            # Handle Internal Media
+            file_info = await media_service.get_media_file_for_serving(
+                media_id, uid, session, range_header
+            )
+
+        # Serving internal file
         if file_info["range_info"]:
             range_info = file_info["range_info"]
             headers = {
@@ -248,7 +519,6 @@ async def get_media(
                 media_type=file_info["content_type"],
             )
 
-        # Return full file
         return FileResponse(
             path=file_info["file_path"],
             media_type=file_info["content_type"],
@@ -258,7 +528,6 @@ async def get_media(
                 "Cache-Control": "public, max-age=3600",
             },
         )
-
     except MediaNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -278,33 +547,79 @@ async def get_media(
         raise
     except Exception as e:
         error_logger.error(
-            f"Error serving media file: {e}",
-            extra={"user_id": str(current_user.id), "media_id": str(media_id)},
+            f"Error serving signed media file: {e}",
+            extra={"media_id": str(media_id)},
             exc_info=True
         )
         raise HTTPException(status_code=500, detail="Failed to serve file")
 
 
 @router.get(
-    "/{media_id}/thumbnail",
+    "/{media_id}/thumbnail/signed",
+    name="get_media_thumbnail_signed",
     responses={
-        401: {"description": "Not authenticated"},
-        403: {"description": "Account inactive or forbidden"},
+        403: {"description": "Invalid or expired signature"},
         404: {"description": "Thumbnail not found"},
     }
 )
-async def get_media_thumbnail(
+async def get_media_thumbnail_signed(
     media_id: uuid.UUID,
-    current_user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[Session, Depends(_get_db_session)]
+    uid: uuid.UUID = Query(..., alias="uid"),
+    exp: int = Query(..., alias="exp"),
+    sig: str = Query(..., alias="sig"),
 ):
-    """Get media thumbnail by ID."""
+    """Get media thumbnail by ID using a short-lived signed URL."""
+    if is_signature_expired(exp, settings.media_signed_url_grace_seconds):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Signed URL expired")
+    if not verify_media_signature(
+        "journiv",
+        "thumbnail",
+        str(media_id),
+        str(uid),
+        exp,
+        sig,
+        settings.secret_key,
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid signature")
+
     media_service = _get_media_service()
-
     try:
-        media = media_service.get_media_by_id(media_id, current_user.id, session)
-        thumbnail_path = media_service.get_media_thumbnail_path(media)
+        with database_module.get_session_context() as session:
+            media = media_service.get_media_by_id(media_id, uid, session)
 
+            # Handle Immich proxy for thumbnails
+            if media.external_provider == "immich" and media.external_asset_id:
+                from app.models.integration import IntegrationProvider
+
+                try:
+                    response = await fetch_proxy_asset(
+                        session=session,
+                        user_id=uid,
+                        provider=IntegrationProvider.IMMICH,
+                        asset_id=media.external_asset_id,
+                        variant="thumbnail",
+                    )
+                except Exception as e:
+                     error_logger.exception(f"Proxy thumbnail failed: {e}")
+                     raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to fetch thumbnail") from e
+
+                if response.status_code != 200:
+                    await _close_httpx_stream(response)
+                    # If 404/401, we might want to try refreshing or just fail
+                    raise HTTPException(status_code=response.status_code, detail="Thumbnail not found in provider")
+
+                return StreamingResponse(
+                    response.aiter_bytes(),
+                    media_type=response.headers.get("content-type", "image/jpeg"),
+                    headers={
+                        "Cache-Control": "public, max-age=3600",
+                        "X-Provider": "immich"
+                    },
+                    background=BackgroundTask(_close_httpx_stream, response)
+                )
+
+            # Handle Internal
+            thumbnail_path = media_service.get_media_thumbnail_path(media)
         return FileResponse(thumbnail_path)
     except MediaNotFoundError:
         raise HTTPException(
@@ -315,8 +630,8 @@ async def get_media_thumbnail(
         raise
     except Exception as e:
         error_logger.error(
-            "Error serving thumbnail",
-            extra={"user_id": str(current_user.id), "media_id": str(media_id), "error": str(e)}
+            "Error serving signed thumbnail",
+            extra={"media_id": str(media_id), "error": str(e)}
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -454,6 +769,12 @@ async def import_from_immich_async(
 
         # 3. Create job and process asynchronously via Celery
         import_service = ImportJobService(session)
+
+        file_logger.info(
+            f"[IMMICH_IMPORT] Creating job for {len(request.asset_ids)} assets",
+            extra={"user_id": str(current_user.id), "entry_id": str(request.entry_id), "asset_ids": request.asset_ids}
+        )
+
         job = await import_service.create_and_process_job_async(
             user_id=current_user.id,
             entry_id=request.entry_id,
@@ -461,8 +782,17 @@ async def import_from_immich_async(
             assets=request.assets
         )
 
+        file_logger.info(
+            f"[IMMICH_IMPORT] Job created: {job.id}",
+            extra={"job_id": str(job.id)}
+        )
+
+        # Ensure placeholders are committed before querying
+        session.commit()
+
         # Re-fetch placeholders for response
         from app.models.entry import EntryMedia
+
         placeholder_media = session.exec(
              select(EntryMedia)
              .where(EntryMedia.entry_id == request.entry_id)
@@ -532,12 +862,27 @@ async def import_from_immich_async(
             extra={"user_id": str(current_user.id), "job_id": str(job.id)}
         )
 
+        signed_media = [
+            attach_signed_urls(
+                EntryMediaResponse.model_validate(record),
+                str(current_user.id),
+                include_incomplete=True,
+                external_base_url=immich_integration.base_url,
+            )
+            for record in placeholder_media
+        ]
+
+        file_logger.info(
+            f"[IMMICH_IMPORT] Returning {len(signed_media)} signed media to frontend",
+            extra={"count": len(signed_media)}
+        )
+
         return ImmichImportStartResponse(
             job_id=job.id,
             status="processing",
             message=f"Import job started. Processing {len(request.asset_ids)} assets in background.",
             total_assets=len(request.asset_ids),
-            media=[EntryMediaResponse.model_validate(record) for record in placeholder_media],
+            media=signed_media,
         )
 
     except HTTPException:

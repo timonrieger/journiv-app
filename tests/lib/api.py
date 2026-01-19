@@ -500,10 +500,80 @@ class JournivApiClient:
             expected=(201,),
         ).json()
 
-    def get_media(self, token: str, media_id: str) -> httpx.Response:
-        return self.request(
-            "GET", f"/media/{media_id}", token=token, expected=(200,)
+    def wait_for_media_ready(self, token: str, media_id: str, *, timeout: int = 10) -> None:
+        """
+        Poll the media endpoint until upload_status is COMPLETED.
+
+        Media processing happens asynchronously, so tests need to wait
+        for the media to be ready before attempting to fetch it.
+
+        Args:
+            token: Authentication token
+            media_id: UUID of the media to wait for
+            timeout: Maximum seconds to wait (default: 10)
+
+        Raises:
+            RuntimeError: If media doesn't become ready within timeout
+        """
+        deadline = time.time() + timeout
+        last_status = None
+
+        while time.time() < deadline:
+            try:
+                # Try to get signed URL - this will fail if media is not ready
+                response = self.request(
+                    "GET", f"/media/{media_id}/sign", token=token, expected=(200, 400)
+                )
+
+                if response.status_code == 200:
+                    # Media is ready
+                    return
+
+                # Parse error to check if it's "Media not ready"
+                if response.status_code == 400:
+                    error_data = response.json()
+                    if "not ready" in error_data.get("detail", "").lower():
+                        last_status = "pending"
+                        time.sleep(0.1)  # Wait 100ms before retrying
+                        continue
+                    # Some other 400 error - raise it
+                    raise JournivApiError("GET", f"/media/{media_id}/sign", 400, response.text)
+
+            except JournivApiError:
+                raise
+
+        raise RuntimeError(
+            f"Media {media_id} did not become ready within {timeout}s (last status: {last_status})"
         )
+
+    def get_media(self, token: str, media_id: str, *, wait_for_ready: bool = True) -> httpx.Response:
+        """
+        Get media file content.
+
+        Args:
+            token: Authentication token
+            media_id: UUID of the media to fetch
+            wait_for_ready: If True, wait for media processing to complete before fetching
+
+        Returns:
+            HTTP response with media file content
+        """
+        # Wait for media to be ready if requested
+        if wait_for_ready:
+            self.wait_for_media_ready(token, media_id)
+
+        # Get signed URL
+        sign_response = self.request(
+            "GET", f"/media/{media_id}/sign", token=token, expected=(200,)
+        ).json()
+        signed_url = sign_response["signed_url"]
+
+        # Convert to absolute URL properly
+        full_url = self._absolute_url(signed_url)
+
+        # Use underlying client to fetch signed URL (no auth header needed)
+        # Using absolute URL overrides the client's base_url
+        return self._client.get(full_url)
 
     # ------------------------------------------------------------------ #
     # Import / export helpers

@@ -438,25 +438,25 @@ class ImportJobService:
         if not integration:
             raise ValueError("Immich integration not found")
 
-        # Create placeholders if assets provided
+        assets_by_id = {}
         if assets:
             assets_by_id = {
                 (asset.id if hasattr(asset, "id") else asset.get("id")): asset
                 for asset in assets
             }
 
-            for asset_id in asset_ids:
-                try:
-                    self.create_placeholder_media(
-                        entry_id=entry_id,
-                        user_id=user_id,
-                        asset_id=asset_id,
-                        integration=integration,
-                        asset_payload=assets_by_id.get(asset_id),
-                    )
-                except Exception as e:
-                     log_warning(f"Failed to create placeholder for {asset_id}: {e}")
-                     # Continue - job will try to process anyway
+        for asset_id in asset_ids:
+            try:
+                self.create_placeholder_media(
+                    entry_id=entry_id,
+                    user_id=user_id,
+                    asset_id=asset_id,
+                    integration=integration,
+                    asset_payload=assets_by_id.get(asset_id),
+                )
+            except Exception as e:
+                log_warning(f"Failed to create placeholder for {asset_id}: {e}")
+                # Continue - job will try to process anyway
 
         job = self.create_job(
             user_id=user_id,
@@ -776,9 +776,10 @@ class ImportJobService:
         entry_id: uuid.UUID,
         integration: Integration,
         session: Session
-    ) -> Tuple[Optional[str], Optional[dict]]:
+    ) -> Tuple[Optional[bytes], Optional[dict]]:
         """
-        Download thumbnail from Immich and save to local storage.
+        Download thumbnail from Immich.
+        Returns thumbnail content and metadata for Phase 2 to save with correct filename.
         """
         try:
             # Fetch asset metadata
@@ -798,33 +799,8 @@ class ImportJobService:
                 return None, asset_metadata
 
             thumbnail_content = response.content
-            metadata = self._extract_immich_metadata(asset_metadata)
-            media_type = metadata["media_type"]
-
-            # Save thumbnail
-            thumbnail_filename = f"{asset_id}_thumb.jpg"
-            thumbnail_path_obj = self.media_service._get_thumbnail_path(
-                thumbnail_filename,
-                media_type,
-                user_id=user_id
-            )
-
-            if not thumbnail_path_obj:
-                log_warning(f"Cannot save thumbnail for unknown media type: {media_type}")
-                return None, asset_metadata
-
-            thumbnail_path_obj.parent.mkdir(parents=True, exist_ok=True)
-
-            tmp_thumbnail_path = thumbnail_path_obj.with_suffix(".tmp")
-            async with aiofiles.open(tmp_thumbnail_path, 'wb') as f:
-                await f.write(thumbnail_content)
-                await f.flush()
-
-            await aiofiles.os.rename(tmp_thumbnail_path, thumbnail_path_obj)
-
-            thumbnail_path = str(thumbnail_path_obj.relative_to(self.media_service.media_root))
-            log_info(f"Downloaded thumbnail for asset {asset_id}: {thumbnail_path}")
-            return thumbnail_path, asset_metadata
+            log_info(f"Downloaded thumbnail for asset {asset_id}")
+            return thumbnail_content, asset_metadata
 
         except Exception as e:
             log_error(f"Error in _download_and_save_thumbnail for {asset_id}: {e}")
@@ -839,10 +815,11 @@ class ImportJobService:
         entry_id: uuid.UUID,
         integration: Integration,
         session: Session,
-        thumbnail_info: Optional[Tuple[Optional[str], Optional[dict]]] = None
+        thumbnail_info: Optional[Tuple[Optional[bytes], Optional[dict]]] = None
     ) -> Optional[dict]:
         """
         Download original asset from Immich and save to local storage.
+        If thumbnail_info is provided, saves thumbnail with Journiv naming convention.
         """
         try:
             # Get metadata from thumbnail info or fetch it
@@ -901,9 +878,50 @@ class ImportJobService:
                     except Exception as e:
                         log_warning(f"Failed to remove temp file {temp_file_path}: {e}")
 
-            # Combine with thumbnail info
+            # Save thumbnail with Journiv naming convention if available
             if thumbnail_info and thumbnail_info[0]:
-                saved_info["thumbnail_path"] = thumbnail_info[0]
+                try:
+                    thumbnail_content = thumbnail_info[0]
+                    media_type = metadata["media_type"]
+
+                    # Get the actual stored filename from saved_info
+                    stored_filename = Path(saved_info["file_path"]).name
+
+                    # Generate thumbnail filename using Journiv's convention
+                    # For images: thumb_{filename} (e.g., thumb_{checksum}.jpg)
+                    # For videos: thumb_{stem}.jpg (e.g., thumb_{checksum}.jpg)
+                    if media_type == MediaType.IMAGE:
+                        thumbnail_filename = f"thumb_{stored_filename}"
+                    elif media_type == MediaType.VIDEO:
+                        # For videos, use stem + .jpg extension
+                        thumbnail_filename = f"thumb_{Path(stored_filename).stem}.jpg"
+                    else:
+                        thumbnail_filename = f"thumb_{stored_filename}"
+
+                    thumbnail_path_obj = self.media_service._get_thumbnail_path(
+                        thumbnail_filename,
+                        media_type,
+                        user_id=user_id
+                    )
+
+                    if thumbnail_path_obj:
+                        thumbnail_path_obj.parent.mkdir(parents=True, exist_ok=True)
+
+                        tmp_thumbnail_path = thumbnail_path_obj.with_suffix(".tmp")
+                        async with aiofiles.open(tmp_thumbnail_path, 'wb') as f:
+                            await f.write(thumbnail_content)
+                            await f.flush()
+
+                        await aiofiles.os.rename(tmp_thumbnail_path, thumbnail_path_obj)
+
+                        thumbnail_path = str(thumbnail_path_obj.relative_to(self.media_service.media_root))
+                        saved_info["thumbnail_path"] = thumbnail_path
+                        log_info(f"Saved thumbnail for asset {asset_id}: {thumbnail_path}")
+                    else:
+                        log_warning(f"Cannot save thumbnail for media type: {media_type}")
+                except Exception as e:
+                    log_warning(f"Failed to save thumbnail for asset {asset_id}: {e}")
+                    # Continue without thumbnail - not critical
 
             # Upsert record
             media = self._upsert_entry_media(

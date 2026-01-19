@@ -7,14 +7,22 @@ from datetime import date
 from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.api.dependencies import get_current_user
 from app.core.database import get_session
 from app.core.exceptions import EntryNotFoundError, JournalNotFoundError, ValidationError
 from app.core.logging_config import log_user_action, log_error
+from app.core.media_signing import attach_signed_urls
 from app.models.user import User
-from app.schemas.entry import EntryCreate, EntryUpdate, EntryResponse, EntryMediaCreate, EntryMediaResponse
+from app.models.integration import Integration, IntegrationProvider
+from app.schemas.entry import (
+    EntryCreate,
+    EntryUpdate,
+    EntryResponse,
+    EntryMediaCreateRequest,
+    EntryMediaResponse,
+)
 from app.schemas.tag import TagResponse
 from app.services.entry_service import EntryService
 from app.services.tag_service import TagService
@@ -365,7 +373,7 @@ async def toggle_pin(
 )
 async def add_media_to_entry(
     entry_id: uuid.UUID,
-    media_data: EntryMediaCreate,
+    media_data: EntryMediaCreateRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     session: Annotated[Session, Depends(get_session)]
 ):
@@ -373,8 +381,20 @@ async def add_media_to_entry(
     entry_service = EntryService(session)
     try:
         media = entry_service.add_media_to_entry(entry_id, current_user.id, media_data)
+        immich_integration = session.exec(
+            select(Integration)
+            .where(Integration.user_id == current_user.id)
+            .where(Integration.provider == IntegrationProvider.IMMICH)
+        ).first()
+        immich_base_url = immich_integration.base_url if immich_integration else None
+        response = EntryMediaResponse.model_validate(media)
+        response = attach_signed_urls(
+            response,
+            str(current_user.id),
+            external_base_url=immich_base_url,
+        )
         log_user_action(current_user.email, f"added media to entry {entry_id}", request_id=None)
-        return media
+        return response
     except EntryNotFoundError:
         raise HTTPException(status_code=404, detail="Entry not found")
     except ValueError as e:
@@ -405,8 +425,24 @@ async def get_entry_media(
     """Get all media attached to an entry."""
     entry_service = EntryService(session)
     try:
+        immich_integration = session.exec(
+            select(Integration)
+            .where(Integration.user_id == current_user.id)
+            .where(Integration.provider == IntegrationProvider.IMMICH)
+        ).first()
+        immich_base_url = immich_integration.base_url if immich_integration else None
+
         media = entry_service.get_entry_media(entry_id, current_user.id)
-        return [EntryMediaResponse.model_validate(media_item) for media_item in media]
+        signed_media: list[EntryMediaResponse] = []
+        for media_item in media:
+            response = EntryMediaResponse.model_validate(media_item)
+            response = attach_signed_urls(
+                response,
+                str(current_user.id),
+                external_base_url=immich_base_url,
+            )
+            signed_media.append(response)
+        return signed_media
     except EntryNotFoundError:
         raise HTTPException(status_code=404, detail="Entry not found")
     except Exception as e:

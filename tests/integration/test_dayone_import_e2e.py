@@ -198,13 +198,19 @@ class TestDayOneImportE2E:
 
         for media in entry_media:
             assert media["media_type"] == "image"
-            assert media["file_path"] is not None
+            assert "file_path" not in media  # Should be excluded
             assert media["checksum"] is not None
             # Verify original filename is preserved
             assert media["original_filename"] is not None
             assert ".jpg" in media["original_filename"]
-            # Ensure media stored under expected directory
-            assert "images/" in media["file_path"]
+
+            # Verify media is accessible by signing it (replaces file_path check)
+            api_client.wait_for_media_ready(api_user.access_token, media["id"])
+            sign_response = api_client.request(
+                "GET", f"/media/{media['id']}/sign",
+                token=api_user.access_token
+            ).json()
+            assert sign_response["signed_url"]
             # Existence check depends on test environment storage setup
             # Markdown content should use Journiv media shortcode format
             assert f"![[media:{media['id']}]]" in content

@@ -258,6 +258,10 @@ class IntegrationAssetResponse(BaseModel):
         ...,
         description="Relative URL to thumbnail proxy endpoint"
     )
+    original_url: Optional[str] = Field(
+        default=None,
+        description="Signed URL to original asset proxy endpoint"
+    )
 
     class Config:
         from_attributes = True

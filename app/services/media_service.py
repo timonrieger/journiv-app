@@ -3,18 +3,20 @@ Media service for file upload and processing.
 """
 import asyncio
 import logging
+import os
 import subprocess
-import uuid
 import tempfile
+import time
+import uuid
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, BinaryIO
+from typing import Any, BinaryIO, Dict, Optional, Tuple
 
 import magic
 from fastapi import UploadFile
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlmodel import Session, select
+from sqlmodel import Session, select, or_
 
 from app.core.config import get_settings
 from app.core.exceptions import (
@@ -29,8 +31,16 @@ from app.core.logging_config import log_error, log_file_upload, log_info, log_wa
 from app.models.entry import Entry, EntryMedia
 from app.models.enums import MediaType, UploadStatus
 from app.models.journal import Journal
+from app.models.integration import Integration, IntegrationProvider
 from app.utils.import_export.media_handler import MediaHandler
 from app.services.media_storage_service import MediaStorageService
+from app.core.media_signing import signed_url_for_journiv, signed_url_for_immich
+from app.schemas.media import (
+    MediaBatchSignRequest,
+    MediaBatchSignResponse,
+    MediaBatchSignResult,
+    MediaBatchSignError
+)
 
 try:
     from PIL import Image
@@ -1286,7 +1296,7 @@ class MediaService:
                 # Log error but don't fail since DB record is already deleted
                 log_error(f"Failed to delete media file: {e}")
 
-    def get_media_file_for_serving(self, media_id: uuid.UUID, user_id: uuid.UUID, session: Session, range_header: Optional[str] = None) -> Dict[str, Any]:
+    async def get_media_file_for_serving(self, media_id: uuid.UUID, user_id: uuid.UUID, session: Session, range_header: Optional[str] = None) -> Dict[str, Any]:
         """Get media file information for serving with optional range support.
 
         Args:
@@ -1306,7 +1316,13 @@ class MediaService:
         media = self.get_media_by_id(media_id, user_id, session)
         full_path = self.get_media_file_path(media)
 
-        file_size = full_path.stat().st_size
+        # Use async stat to avoid blocking event loop for file system access
+        try:
+            stat_result = await asyncio.to_thread(os.stat, full_path)
+            file_size = stat_result.st_size
+        except FileNotFoundError:
+            raise MediaNotFoundError("Media file not found on disk")
+
         content_type, _ = mimetypes.guess_type(str(full_path))
         content_type = content_type or media.mime_type or "application/octet-stream"
 
@@ -1421,3 +1437,215 @@ class MediaService:
         # Commit all changes
         session.commit()
         return processed_count
+
+
+    async def batch_sign_media(
+        self,
+        request: MediaBatchSignRequest,
+        current_user_id: uuid.UUID,
+        session: Session
+    ) -> MediaBatchSignResponse:
+        """
+        Batch sign media URLs for Journiv and Immich assets.
+
+        Optimized to fetch all necessary data in bulk and generate signatures.
+        """
+        if len(request.items) > 200:
+            raise ValueError("Too many items to sign in one request (limit 200)")
+
+        results: list[MediaBatchSignResult] = []
+        errors: dict[tuple[str, str], str] = {}
+
+        item_ids_to_query: list[uuid.UUID] = []
+
+        # 1. Validate basic format and gather IDs
+        for item in request.items:
+            item_key = (item.id, item.variant)
+
+            if item.variant not in ("original", "thumbnail"):
+                errors[item_key] = "Unsupported variant"
+                continue
+
+            try:
+                uid_obj = uuid.UUID(item.id)
+            except ValueError:
+                errors[item_key] = "Invalid media id format"
+                continue
+
+            item_ids_to_query.append(uid_obj)
+
+        # 2. Fetch minimal data for validation
+        valid_media_map: dict[str, dict[str, object]] = {}
+        if item_ids_to_query:
+            query_ids_str = [str(uid) for uid in item_ids_to_query]
+
+            logger.info(f"Batch sign querying for {len(item_ids_to_query)} IDs for user {current_user_id}")
+            logger.debug(f"Batch sign querying for IDs: {item_ids_to_query}")
+            rows = session.exec(
+                select(
+                    EntryMedia.id,
+                    EntryMedia.upload_status,
+                    EntryMedia.external_provider,
+                    EntryMedia.external_asset_id,
+                    EntryMedia.file_path,
+                    EntryMedia.thumbnail_path,
+                    EntryMedia.media_type,
+                )
+                .join(Entry)
+                .where(
+                    or_(
+                        EntryMedia.id.in_(item_ids_to_query),
+                        EntryMedia.external_asset_id.in_(query_ids_str)
+                    )
+                )
+                .where(Entry.user_id == current_user_id)
+            ).all()
+            logger.info(f"Batch sign found {len(rows)} matching rows")
+            logger.debug(f"Batch sign found matching rows: {rows}")
+
+            # Build map indexed by both internal ID and external asset ID
+            for media_id, upload_status, external_provider, external_asset_id, file_path, thumbnail_path, media_type in rows:
+                media_data = {
+                    "id": str(media_id),
+                    "upload_status": upload_status,
+                    "external_provider": external_provider,
+                    "external_asset_id": external_asset_id,
+                    "file_path": file_path,
+                    "thumbnail_path": thumbnail_path,
+                    "media_type": media_type,
+                }
+
+                # Index by internal ID
+                valid_media_map[str(media_id)] = media_data
+
+                # Index by external ID if present
+                if external_asset_id:
+                    valid_media_map[external_asset_id] = media_data
+
+        # 3. Validate Immich integration once if needed
+        needs_immich = any(
+            meta.get("external_provider") == "immich"
+            for meta in valid_media_map.values()
+        )
+        immich_active = True
+        if needs_immich:
+            integration = session.exec(
+                select(Integration)
+                .where(Integration.user_id == current_user_id)
+                .where(Integration.provider == IntegrationProvider.IMMICH)
+            ).first()
+            immich_active = bool(integration and integration.is_active)
+
+        # 4. Generate signatures
+        now = int(time.time())
+        signed_url_ttl = self.settings.media_signed_url_ttl_seconds
+        video_signed_url_ttl = self.settings.media_signed_url_video_ttl_seconds
+        thumb_signed_url_ttl = self.settings.media_thumbnail_signed_url_ttl_seconds
+        user_id_str = str(current_user_id)
+
+        for item in request.items:
+            item_key = (item.id, item.variant)
+            if item_key in errors:
+                continue
+
+            media_meta = valid_media_map.get(item.id)
+            if not media_meta:
+                errors[item_key] = "Media not found"
+                continue
+
+            # Always use the Journiv internal ID for signing
+            internal_media_id = media_meta["id"]
+            upload_status = media_meta["upload_status"]
+            external_provider = media_meta["external_provider"]
+            external_asset_id = media_meta["external_asset_id"]
+            file_path = media_meta["file_path"]
+            thumbnail_path = media_meta["thumbnail_path"]
+            media_type = media_meta["media_type"]
+
+            if upload_status == UploadStatus.FAILED:
+                errors[item_key] = "Media failed"
+                continue
+
+            if external_provider == "immich":
+                if not immich_active:
+                    errors[item_key] = "Immich integration not active"
+                    continue
+                if not external_asset_id:
+                    errors[item_key] = "Missing external asset id"
+                    continue
+
+                # Enforce COMPLETED status for all Immich assets
+                # This handles:
+                # 1. Copy-mode placeholders (PROCESSING) -> Not ready
+                # 2. Link-only placeholders (PROCESSING) -> Not ready
+                # 3. Copy-mode downloaded (COMPLETED) -> Ready
+                # 4. Link-only processed (COMPLETED) -> Ready
+                if upload_status != UploadStatus.COMPLETED:
+                    errors[item_key] = "Media not ready"
+                    continue
+
+                # For copy-mode (local file), ensure thumbnail exists if requested
+                if file_path and item.variant == "thumbnail" and not thumbnail_path:
+                    errors[item_key] = "Thumbnail not available"
+                    continue
+
+                # Generate signed URL (works for both LINK_ONLY and COPY mode once ready)
+                if item.variant == "thumbnail":
+                    ttl_seconds = thumb_signed_url_ttl
+                elif media_type == MediaType.VIDEO:
+                    ttl_seconds = video_signed_url_ttl
+                else:
+                    ttl_seconds = signed_url_ttl
+                expires_at = now + ttl_seconds
+                signed_url = signed_url_for_journiv(
+                    internal_media_id,
+                    user_id_str,
+                    item.variant,
+                    expires_at,
+                )
+            elif external_provider is None:
+                if upload_status != UploadStatus.COMPLETED:
+                    errors[item_key] = "Media not ready"
+                    continue
+                if item.variant == "thumbnail" and not thumbnail_path:
+                    errors[item_key] = "Thumbnail not available"
+                    continue
+                if item.variant == "original" and not file_path:
+                    errors[item_key] = "Media file not available"
+                    continue
+                if item.variant == "thumbnail":
+                    ttl_seconds = thumb_signed_url_ttl
+                elif media_type == MediaType.VIDEO:
+                    ttl_seconds = video_signed_url_ttl
+                else:
+                    ttl_seconds = signed_url_ttl
+                expires_at = now + ttl_seconds
+                signed_url = signed_url_for_journiv(
+                    internal_media_id,
+                    user_id_str,
+                    item.variant,
+                    expires_at,
+                )
+            else:
+                errors[item_key] = "Unsupported external provider"
+                continue
+
+            results.append(
+                MediaBatchSignResult(
+                    id=item.id,
+                    variant=item.variant,
+                    signed_url=signed_url,
+                    expires_at=expires_at,
+                )
+            )
+
+        error_items = [
+            MediaBatchSignError(
+                id=item_id,
+                variant=item_variant,
+                error=error,
+            )
+            for (item_id, item_variant), error in errors.items()
+        ]
+
+        return MediaBatchSignResponse(results=results, errors=error_items)

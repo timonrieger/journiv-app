@@ -207,11 +207,11 @@ class TestIntegrationEndpoints:
     @pytest.mark.asyncio
     async def test_proxy_client_is_singleton(self):
         """Test that the proxy client is reused across calls."""
-        from app.integrations import router as integrations_router
+        from app.integrations import service as integrations_service
 
-        integrations_router._proxy_client = None
-        client_first = integrations_router._get_proxy_client()
-        client_second = integrations_router._get_proxy_client()
+        integrations_service._proxy_client = None
+        client_first = await integrations_service._get_proxy_client()
+        client_second = await integrations_service._get_proxy_client()
 
         assert isinstance(client_first, httpx.AsyncClient)
         assert client_first is client_second
@@ -314,20 +314,14 @@ class TestIntegrationOptimizations:
     @pytest.mark.asyncio
     async def test_proxy_credential_caching(self):
         """Test that proxy endpoints use cache and avoid DB on hit."""
-        from app.integrations.router import proxy_thumbnail
+        from app.integrations.service import fetch_proxy_asset
         from app.models.integration import IntegrationProvider
         from app.models.user import User
-        from fastapi import HTTPException
         from unittest.mock import MagicMock, AsyncMock
+        import uuid
 
         # Mocks
-        mock_user = User(
-            id="user-123",
-            email="test@example.com",
-            password="hashed-password",
-            name="Test User",
-            is_active=True,
-        )
+        user_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
         mock_cache = MagicMock()
         mock_cache.get.return_value = {
             "base_url": "https://cached.com",
@@ -335,9 +329,9 @@ class TestIntegrationOptimizations:
             "is_active": True
         }
 
-        # Mock Cache Getter
-        with patch("app.integrations.router._get_integration_cache", return_value=mock_cache):
-            # Mock DB Context to ensure it's NOT used - Patching source because it's locally imported
+        # Mock Cache Getter - patch in service module where it's used
+        with patch("app.integrations.service._get_integration_cache", return_value=mock_cache):
+            # Mock DB Context to ensure it's NOT used when cache hits
             with patch("app.core.database.get_session_context") as mock_db_ctx:
                 # Mock Proxy Client to avoid actual network call
                 mock_client = AsyncMock()
@@ -348,22 +342,27 @@ class TestIntegrationOptimizations:
                 mock_client.build_request.return_value = "request"
                 mock_client.send.return_value = mock_response
 
-                with patch("app.integrations.router._get_proxy_client", return_value=mock_client):
-                    with patch("app.core.encryption.decrypt_token", return_value="decrypted-key"):
+                with patch("app.integrations.service._get_proxy_client", return_value=mock_client):
+                    # Patch decrypt_token where it's used (in service module)
+                    with patch("app.integrations.service.decrypt_token", return_value="decrypted-key"):
+                        # Mock session (needed as parameter even though DB shouldn't be hit)
+                        mock_session = MagicMock()
 
-                        # Call the endpoint function directly
-                        await proxy_thumbnail(
+                        # Call the service function directly
+                        await fetch_proxy_asset(
+                            session=mock_session,
+                            user_id=user_id,
                             provider=IntegrationProvider.IMMICH,
                             asset_id="asset-123",
-                            current_user=mock_user
+                            variant="thumbnail"
                         )
 
                         # VERIFICATION:
                         # 1. Cache was checked
-                        mock_cache.get.assert_called_with(scope_id="user-123", cache_type="immich")
+                        mock_cache.get.assert_called_with(scope_id=str(user_id), cache_type="immich")
 
-                        # 2. DB was NOT touched (context manager not entered)
-                        mock_db_ctx.assert_not_called()
+                        # 2. DB was NOT touched (session.exec not called because cache hit)
+                        mock_session.exec.assert_not_called()
 
                         # 3. Request used cached URL
                         mock_client.build_request.assert_called()

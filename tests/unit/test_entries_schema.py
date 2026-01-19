@@ -7,8 +7,11 @@ from app.models.enums import MediaType, UploadStatus
 
 def test_entry_media_response_url_computation():
     """
-    Verify that EntryMediaResponse correctly computes the 'url' field
+    Verify that EntryMediaResponse correctly handles serialization
     for both local and link-only media.
+
+    The schema excludes internal fields like external_provider and external_asset_id
+    from serialization. URLs are provided via signed_url fields, not a computed url field.
     """
     entry_id = uuid.uuid4()
     media_id = uuid.uuid4()
@@ -30,8 +33,20 @@ def test_entry_media_response_url_computation():
 
     dumped = link_only_media.model_dump()
 
-    assert "url" in dumped, "url field missing from link-only dump"
-    assert dumped["url"] == "/api/v1/integrations/immich/proxy/asset-123/original"
+    # Verify external fields are excluded from serialization
+    assert "external_provider" not in dumped, "external_provider should be excluded from dump"
+    assert "external_asset_id" not in dumped, "external_asset_id should be excluded from dump"
+    assert "external_url" not in dumped, "external_url should be excluded from dump"
+
+    # Verify internal file paths are excluded
+    assert "file_path" not in dumped, "file_path should be excluded from dump"
+    assert "thumbnail_path" not in dumped, "thumbnail_path should be excluded from dump"
+
+    # Verify the response has the expected fields
+    assert "id" in dumped
+    assert "entry_id" in dumped
+    assert "media_type" in dumped
+    assert dumped["id"] == media_id
 
     # Case 2: Local Media
     local_media = EntryMediaResponse(
@@ -47,5 +62,11 @@ def test_entry_media_response_url_computation():
 
     dumped_local = local_media.model_dump()
 
-    assert "url" in dumped_local, "url field missing from local dump"
-    assert dumped_local["url"] == f"/api/v1/media/{media_id}"
+    # Verify file_path is excluded from serialization
+    assert "file_path" not in dumped_local, "file_path should be excluded from dump"
+    assert "thumbnail_path" not in dumped_local, "thumbnail_path should be excluded from dump"
+
+    # Verify the response has the expected fields
+    assert "id" in dumped_local
+    assert "entry_id" in dumped_local
+    assert dumped_local["id"] == media_id

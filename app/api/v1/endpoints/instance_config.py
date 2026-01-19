@@ -27,5 +27,9 @@ async def get_instance_config() -> InstanceConfigResponse:
     """
     return InstanceConfigResponse(
         import_export_max_file_size_mb=settings.import_export_max_file_size_mb,
+        max_file_size_mb=settings.max_file_size_mb,
+        allowed_media_types=settings.allowed_media_types,
+        allowed_file_extensions=settings.allowed_file_extensions,
         disable_signup=settings.disable_signup,
+        immich_base_url=settings.immich_base_url,
     )

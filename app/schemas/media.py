@@ -58,6 +58,44 @@ class ImmichImportAsset(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
+class MediaSignedUrlResponse(BaseModel):
+    """Response schema for short-lived signed media URLs."""
+    signed_url: str
+    expires_at: int
+
+
+class MediaBatchSignItem(BaseModel):
+    """Single batch signing request item."""
+    id: str
+    variant: str
+
+
+class MediaBatchSignRequest(BaseModel):
+    """Batch signing request payload."""
+    items: list[MediaBatchSignItem] = Field(..., min_length=1, max_length=100)
+
+
+class MediaBatchSignResult(BaseModel):
+    """Batch signing result for a single item."""
+    id: str
+    variant: str
+    signed_url: str
+    expires_at: int
+
+
+class MediaBatchSignError(BaseModel):
+    """Batch signing error for a single item."""
+    id: str
+    variant: str
+    error: str
+
+
+class MediaBatchSignResponse(BaseModel):
+    """Batch signing response payload."""
+    results: list[MediaBatchSignResult] = Field(default_factory=list)
+    errors: list[MediaBatchSignError] = Field(default_factory=list)
+
+
 class ImmichImportRequest(BaseModel):
     """Request to import assets from Immich."""
     asset_ids: list[str] = Field(..., min_length=1, max_length=100)

@@ -3,9 +3,9 @@ Entry schemas.
 """
 import uuid
 from datetime import datetime, date
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 
-from pydantic import BaseModel, computed_field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.base import TimestampMixin
 
@@ -101,48 +101,57 @@ class EntryMediaBase(BaseModel):
     upload_status: UploadStatus = UploadStatus.PENDING
     file_metadata: Optional[str] = None
 
-    # External provider fields
+class EntryMediaExternalFields(BaseModel):
+    """External provider fields (internal use)."""
     external_provider: Optional[str] = None
     external_asset_id: Optional[str] = None
     external_url: Optional[str] = None
     external_created_at: Optional[datetime] = None
     external_metadata: Optional[Dict[str, Any]] = None
 
-    @computed_field
-    @property
-    def is_external(self) -> bool:
-        """Check if this media is linked from an external provider."""
-        return self.external_provider is not None
 
-
-class EntryMediaCreate(EntryMediaBase):
+class EntryMediaCreate(EntryMediaBase, EntryMediaExternalFields):
     """Entry media creation schema."""
     entry_id: uuid.UUID
     checksum: Optional[str] = None
 
 
-class EntryMediaResponse(EntryMediaBase, TimestampMixin):
+class EntryMediaCreateRequest(EntryMediaBase):
+    """Entry media creation schema for public API."""
+    entry_id: uuid.UUID
+    checksum: Optional[str] = None
+
+
+class MediaOrigin(BaseModel):
+    """Optional origin metadata for external media."""
+    source: Literal["internal", "immich"]
+    external_id: Optional[str] = None
+    external_url: Optional[str] = None
+
+
+class EntryMediaExternalResponseFields(BaseModel):
+    """External provider fields (excluded from response serialization)."""
+    external_provider: Optional[str] = Field(default=None, exclude=True)
+    external_asset_id: Optional[str] = Field(default=None, exclude=True)
+    external_url: Optional[str] = Field(default=None, exclude=True)
+    external_created_at: Optional[datetime] = Field(default=None, exclude=True)
+    external_metadata: Optional[Dict[str, Any]] = Field(default=None, exclude=True)
+
+
+class EntryMediaResponse(EntryMediaBase, EntryMediaExternalResponseFields, TimestampMixin):
     """Entry media response schema."""
+    file_path: Optional[str] = Field(default=None, exclude=True)
+    thumbnail_path: Optional[str] = Field(default=None, exclude=True)
     id: uuid.UUID
     entry_id: uuid.UUID
     created_at: datetime
     checksum: Optional[str] = None
     processing_error: Optional[str] = None
-
-    def model_dump(self, **kwargs):
-        """Custom serialization to ensure enums are converted to strings."""
-        data = super().model_dump(**kwargs)
-        # Convert enums to their string values
-        if 'media_type' in data and hasattr(data['media_type'], 'value'):
-            data['media_type'] = data['media_type'].value
-        if 'upload_status' in data and hasattr(data['upload_status'], 'value'):
-            data['upload_status'] = data['upload_status'].value
-
-        # Explicitly ensure url is included
-        if 'url' not in data:
-            data['url'] = self.url
-
-        return data
+    signed_url: Optional[str] = None
+    signed_thumbnail_url: Optional[str] = None
+    signed_url_expires_at: Optional[int] = None
+    signed_thumbnail_expires_at: Optional[int] = None
+    origin: Optional[MediaOrigin] = None
 
     @model_validator(mode='after')
     def validate_source_presence(self):
@@ -161,18 +170,3 @@ class EntryMediaResponse(EntryMediaBase, TimestampMixin):
             raise ValueError("Media must have either a local file or an external source")
 
         return self
-
-    @computed_field
-    @property
-    def url(self) -> str:
-        """
-        Get the fully qualified or relative URL to access this media.
-        """
-        # Link-only media (Immich, etc.)
-        if self.external_provider and self.external_asset_id and not self.file_path:
-            # Return proxy URL
-            # Note: external_provider is likely a string here due to Pydantic serialization
-            return f"/api/v1/integrations/{self.external_provider}/proxy/{self.external_asset_id}/original"
-
-        # Local media (or copy-mode)
-        return f"/api/v1/media/{self.id}"
