@@ -131,10 +131,10 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 100
     allowed_media_types: Optional[List[str]] = None
     allowed_file_extensions: Optional[List[str]] = None
-    media_signed_url_ttl_seconds: int = 120  # For images and general media
-    media_signed_url_video_ttl_seconds: int = 120  # 2 minutes for videos (same as images)
-    media_thumbnail_signed_url_ttl_seconds: int = 120
-    media_signed_url_grace_seconds: int = 60
+    media_signed_url_ttl_seconds: int = 300  # 5 minutes for images and general media
+    media_signed_url_video_ttl_seconds: int = 1200  # 20 minutes for videos
+    media_thumbnail_signed_url_ttl_seconds: int = 86400  # 24 hours for thumbnails
+    media_signed_url_grace_seconds: int = 60 # 1 minute grace period
 
     # File Processing Timeouts
     ffprobe_timeout: int = 300  # 5 minutes for video metadata extraction
@@ -630,9 +630,9 @@ class Settings(BaseSettings):
             raise ValueError("Grace period cannot exceed 300 seconds (5 minutes)")
 
         # Validate grace period is shorter than all media TTLs
-        ttl = info.data.get('media_signed_url_ttl_seconds', 120)
-        video_ttl = info.data.get('media_signed_url_video_ttl_seconds', 120)
-        thumb_ttl = info.data.get('media_thumbnail_signed_url_ttl_seconds', 120)
+        ttl = info.data.get('media_signed_url_ttl_seconds', 300)
+        video_ttl = info.data.get('media_signed_url_video_ttl_seconds', 1200)
+        thumb_ttl = info.data.get('media_thumbnail_signed_url_ttl_seconds', 86400)
 
         min_ttl = min(ttl, video_ttl, thumb_ttl)
 
