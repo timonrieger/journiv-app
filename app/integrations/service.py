@@ -688,7 +688,12 @@ async def fetch_proxy_asset(
         if variant == "thumbnail":
             url = f"{integration_base_url}/api/assets/{asset_id}/thumbnail"
         elif variant == "original":
-            url = f"{integration_base_url}/api/assets/{asset_id}/original"
+            # For original, we use the thumbnail endpoint with size=preview which
+            # gives a higher quality image jpg images and work for HEIC images too.
+            # We do not get /original as those are higher quality and large in size and
+            # overkill to display on web/mobile and also HEIC will fail unless we support
+            # HEIC conversion.
+            url = f"{integration_base_url}/api/assets/{asset_id}/thumbnail?size=preview"
         else:
             raise ValueError(f"Unknown variant {variant}")
     else:
