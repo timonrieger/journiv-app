@@ -33,7 +33,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.config import settings
 from app.core.encryption import encrypt_token, decrypt_token
 from app.core.time_utils import utc_now
-from app.integrations import immich
+from app.integrations import immich_ as immich
 from app.models.integration import Integration, IntegrationProvider, ImportMode, AssetType
 from app.integrations.schemas import (
     IntegrationStatusResponse,
@@ -784,11 +784,9 @@ async def fetch_proxy_asset(
     if range_header and variant in ("thumbnail", "original"):
         headers["Range"] = range_header
 
-    # Make request
     client = await _get_proxy_client()
     try:
         request = client.build_request("GET", url, headers=headers)
-        # The timeout is already configured on the client itself at initialization
         response = await client.send(request, stream=True)
         return response
     except Exception as e:

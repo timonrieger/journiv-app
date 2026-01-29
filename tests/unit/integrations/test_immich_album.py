@@ -1,7 +1,7 @@
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from app.integrations import immich
+from app.integrations import immich_ as immich
 
 class TestImmichAlbum:
 

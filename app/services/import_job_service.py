@@ -4,14 +4,14 @@ Handles both link-only and copy mode imports.
 """
 import asyncio
 import time
+import shutil
+import tempfile
 import uuid
 from datetime import datetime
-from typing import Optional, Tuple, Dict, Any
 from pathlib import Path
+from typing import Any, Dict, Optional
 
-import aiofiles
-import aiofiles.os
-import httpx
+from immich.client.generated.models.asset_media_size import AssetMediaSize
 from sqlmodel import Session, select
 
 from app.core.encryption import decrypt_token
@@ -23,13 +23,12 @@ from app.models.integration import Integration, IntegrationProvider, ImportMode
 from app.schemas.entry import EntryMediaCreate
 from app.services.entry_service import EntryService
 from app.services.media_service import MediaService
-from app.integrations import immich
+from app.integrations import immich_ as immich
 
-from app.core.logging_config import log_debug, log_info, log_error, log_warning
+from app.core.logging_config import log_info, log_error, log_warning
 from app.core.media_signing import normalize_delta_media_ids
 from app.core.scoped_cache import ScopedCache
 from app.utils.quill_delta import extract_plain_text
-from app.core.http_client import get_http_client
 
 # Batch size for parallel downloads (configurable in future)
 COPY_MODE_BATCH_SIZE = 3
@@ -228,10 +227,14 @@ class ImportJobService:
                 else:
                     existing.external_metadata = {**existing.external_metadata, **metadata["external_metadata"]}
 
-            if file_path: existing.file_path = file_path
-            if file_size: existing.file_size = file_size
-            if checksum: existing.checksum = checksum
-            if thumbnail_path: existing.thumbnail_path = thumbnail_path
+            if file_path: 
+                existing.file_path = file_path
+            if file_size: 
+                existing.file_size = file_size
+            if checksum: 
+                existing.checksum = checksum
+            if thumbnail_path: 
+                existing.thumbnail_path = thumbnail_path
 
             existing.upload_status = upload_status
 
@@ -370,61 +373,6 @@ class ImportJobService:
 
 
 
-    async def _fetch_with_retry(
-        self,
-        url: str,
-        headers: Dict[str, str],
-        method: str = "GET",
-        json_data: Optional[Dict[str, Any]] = None,
-        max_retries: int = 2,
-        timeout: float = 30.0
-    ) -> Optional[httpx.Response]:
-        """
-        Generic HTTP request helper with exponential backoff retry logic.
-        """
-        for attempt in range(max_retries + 1):
-            try:
-                client = await get_http_client()
-                if method == "GET":
-                    response = await client.get(url, headers=headers, timeout=timeout)
-                elif method == "POST":
-                    response = await client.post(url, headers=headers, json=json_data, timeout=timeout)
-                else:
-                    raise ValueError(f"Unsupported method: {method}")
-
-                if response.status_code in (401, 403):
-                    log_error(f"Authentication failed for {url}: {response.status_code}")
-                    return response
-
-                if response.status_code == 404:
-                    return response
-
-                # Retry on transient errors (5xx)
-                if response.status_code >= 500 and attempt < max_retries:
-                    wait_time = 2 ** attempt
-                    log_warning(f"Retry {attempt + 1}/{max_retries} for {url} after {wait_time}s (server error {response.status_code})")
-                    await asyncio.sleep(wait_time)
-                    continue
-
-                response.raise_for_status()
-                return response
-
-            except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
-                if attempt < max_retries:
-                    wait_time = 2 ** attempt
-                    log_warning(f"Retry {attempt + 1}/{max_retries} for {url} after {wait_time}s ({type(e).__name__})")
-                    await asyncio.sleep(wait_time)
-                    continue
-                log_error(f"Final failure for {url} after {max_retries + 1} attempts: {e}")
-            except Exception as e:
-                log_error(f"Unexpected error for {url}: {e}")
-                if attempt < max_retries:
-                    continue
-                break
-        return None
-
-
-
     def _create_link_only_media(
         self,
         entry_id: uuid.UUID,
@@ -514,37 +462,29 @@ class ImportJobService:
         """
         Background task to process copy-mode import job.
 
-        Two-phase approach:
-        1. Phase 1: Download thumbnails in parallel batches (for quick UI display)
-        2. Phase 2: Download originals in parallel batches
+        Uses Immich SDK (async with client); one method per asset: download original + thumbnail via SDK, then save and upsert.
         """
         from app.core.database import engine
 
-        # Create new session for background task
         thread_session = Session(engine)
         try:
             thread_service = ImportJobService(thread_session)
-            # Fetch job
             job = thread_session.exec(
-                select(ImportJob)
-                .where(ImportJob.id == job_id)
+                select(ImportJob).where(ImportJob.id == job_id)
             ).first()
 
             if not job:
                 log_error(f"Import job {job_id} not found")
                 return
 
-            # Mark as processing
             job.mark_running()
             thread_session.add(job)
             thread_session.commit()
 
             log_info(
-                f"Processing copy-mode import job {job_id}: "
-                f"{job.total_items} assets"
+                f"Processing copy-mode import job {job_id}: {job.total_items} assets"
             )
 
-            # Get user and integration
             user = thread_session.get(User, job.user_id)
             if not user:
                 raise ValueError(f"User {job.user_id} not found")
@@ -558,37 +498,53 @@ class ImportJobService:
             if not integration or not integration.is_active:
                 raise ValueError("Immich integration not active")
 
-            # Decrypt API key
             api_key = decrypt_token(integration.access_token_encrypted)
-            base_url = integration.base_url.rstrip('/')
-
-            # Get asset IDs
+            base_url = integration.base_url.rstrip("/")
             asset_ids = job.result_data.get("asset_ids", [])
 
-            # Phase 1: Download thumbnails in parallel batches
-            thumbnail_cache = await thread_service._process_thumbnail_phase(
-                job=job,
-                asset_ids=asset_ids,
-                base_url=base_url,
-                api_key=api_key,
-                integration=integration,
-                session=thread_session
-            )
+            async with immich._create_immich_client(
+                api_key=api_key, base_url=base_url
+            ) as client:
+                for i in range(0, len(asset_ids), COPY_MODE_BATCH_SIZE):
+                    batch = asset_ids[i : i + COPY_MODE_BATCH_SIZE]
+                    tasks = [
+                        thread_service._copy_one_asset_async(
+                            client, uuid.UUID(aid), job, integration, thread_session
+                        )
+                        for aid in batch
+                    ]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Phase 2: Download originals in parallel batches
-            # Only creates EntryMedia if original succeeds (with thumbnail if available)
-            await thread_service._process_original_phase(
-                job=job,
-                asset_ids=asset_ids,
-                base_url=base_url,
-                api_key=api_key,
-                integration=integration,
-                session=thread_session,
-                thumbnail_cache=thumbnail_cache
-            )
+                    processed = 0
+                    failed = 0
+                    for aid, result in zip(batch, results):
+                        if isinstance(result, Exception):
+                            log_error(result)
+                            thread_service._mark_media_failed(
+                                job.entry_id, aid, thread_session, str(result)
+                            )
+                            failed += 1
+                        elif result:
+                            processed += 1
+                        else:
+                            thread_service._mark_media_failed(
+                                job.entry_id, aid, thread_session
+                            )
+                            failed += 1
 
-            # Final status update
-            if job.failed_items == 0 and job.status not in {JobStatus.FAILED, JobStatus.PARTIAL, JobStatus.CANCELLED}:
+                    job.update_progress(
+                        job.processed_items + processed,
+                        job.total_items,
+                        job.failed_items + failed,
+                    )
+                    thread_session.add(job)
+                    thread_session.commit()
+
+            if job.failed_items == 0 and job.status not in {
+                JobStatus.FAILED,
+                JobStatus.PARTIAL,
+                JobStatus.CANCELLED,
+            }:
                 job.mark_completed()
             thread_session.add(job)
             thread_session.commit()
@@ -600,12 +556,125 @@ class ImportJobService:
 
         except Exception as e:
             log_error(e)
-            if 'job' in locals():
+            if "job" in locals():
                 job.mark_failed(str(e)[:2000])
                 thread_session.add(job)
                 thread_session.commit()
         finally:
             thread_session.close()
+
+    async def _copy_one_asset_async(
+        self,
+        client: immich.ImmichAsyncClient,
+        asset_id_uuid: uuid.UUID,
+        job: ImportJob,
+        integration: Integration,
+        session: Session,
+    ) -> bool:
+        """
+        Download one asset (original + thumbnail) via Immich SDK, save to storage, upsert EntryMedia, post-process.
+        """
+        temp_dir = Path(tempfile.mkdtemp())
+        try:
+            try:
+                asset = await client.assets.get_asset_info(id=asset_id_uuid)
+                if not asset:
+                    self._mark_media_failed(
+                        job.entry_id, str(asset_id_uuid), session
+                    )
+                    return False
+            except Exception as e:
+                log_error(f"get_asset_info failed for {asset_id_uuid}: {e}")
+                self._mark_media_failed(
+                    job.entry_id, str(asset_id_uuid), session, str(e)
+                )
+                return False
+
+            asset_dict = asset.model_dump(by_alias=True)
+            metadata = self._extract_immich_metadata(asset_dict)
+            filename = metadata["original_filename"]
+            user_id = str(job.user_id)
+            is_video = getattr(asset.type, "value", str(asset.type)) == "VIDEO"
+
+            try:
+                if is_video:
+                    path_original = await client.assets.play_asset_video_to_file(
+                        id=asset_id_uuid, out_dir=temp_dir, show_progress=False
+                    )
+                else:
+                    path_original = await client.assets.download_asset_to_file(
+                        id=asset_id_uuid, out_dir=temp_dir, show_progress=False
+                    )
+
+                path_thumb = await client.assets.view_asset_to_file(
+                    id=asset_id_uuid,
+                    out_dir=temp_dir,
+                    size=AssetMediaSize.PREVIEW,
+                    show_progress=False,
+                )
+            except Exception as e:
+                log_error(f"SDK download failed for {asset_id_uuid}: {e}")
+                self._mark_media_failed(
+                    job.entry_id, str(asset_id_uuid), session, str(e)
+                )
+                return False
+
+            try:
+                saved_info = await self.media_service.save_uploaded_file(
+                    original_filename=filename,
+                    user_id=user_id,
+                    media_type=metadata["media_type"],
+                    file_path=str(path_original),
+                )
+            except Exception as e:
+                log_error(f"save_uploaded_file failed for {asset_id_uuid}: {e}")
+                self._mark_media_failed(
+                    job.entry_id, str(asset_id_uuid), session, str(e)
+                )
+                return False
+
+            stored_filename = Path(saved_info["file_path"]).name
+            if metadata["media_type"] == MediaType.IMAGE:
+                thumbnail_filename = f"thumb_{stored_filename}"
+            elif metadata["media_type"] == MediaType.VIDEO:
+                thumbnail_filename = f"thumb_{Path(stored_filename).stem}.jpg"
+            else:
+                thumbnail_filename = f"thumb_{stored_filename}"
+
+            thumbnail_path_obj = self.media_service._get_thumbnail_path(
+                thumbnail_filename, metadata["media_type"], user_id=user_id
+            )
+            if thumbnail_path_obj and path_thumb.exists():
+                thumbnail_path_obj.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path_thumb, thumbnail_path_obj)
+                saved_info["thumbnail_path"] = str(
+                    thumbnail_path_obj.relative_to(self.media_service.media_root)
+                )
+                log_info(f"Saved thumbnail for asset {asset_id_uuid}: {saved_info['thumbnail_path']}")
+
+            media = self._upsert_entry_media(
+                entry_id=job.entry_id,
+                user_id=job.user_id,
+                asset_id=str(asset_id_uuid),
+                asset_data=asset_dict,
+                file_info=saved_info,
+                upload_status=UploadStatus.COMPLETED,
+                session=session,
+            )
+
+            try:
+                self.media_service.process_uploaded_file(
+                    media_id=str(media.id),
+                    file_path=saved_info["full_file_path"],
+                    user_id=user_id,
+                )
+            except Exception as e:
+                log_warning(f"Processing failed for asset {asset_id_uuid}: {e}")
+
+            log_info(f"Successfully imported original for asset {asset_id_uuid}")
+            return True
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     async def process_link_only_job_async(
         self,
@@ -708,297 +777,6 @@ class ImportJobService:
 
 
 
-    async def _process_thumbnail_phase(
-        self,
-        job: ImportJob,
-        asset_ids: list[str],
-        base_url: str,
-        api_key: str,
-        integration: Integration,
-        session: Session
-    ) -> dict:
-        """
-        Phase 1: Download thumbnails in parallel batches.
-
-        Downloads and saves thumbnails for quick UI display.
-        Does NOT create EntryMedia records yet - that happens in Phase 2 only if original succeeds.
-        """
-        batch_size = COPY_MODE_BATCH_SIZE
-        thumbnail_cache = {}
-
-        for i in range(0, len(asset_ids), batch_size):
-            batch = asset_ids[i:i + batch_size]
-            tasks = [
-                self._download_and_save_thumbnail(
-                    asset_id=asset_id,
-                    base_url=base_url,
-                    api_key=api_key,
-                    user_id=str(job.user_id),
-                    entry_id=job.entry_id,
-                    integration=integration,
-                    session=session
-                )
-                for asset_id in batch
-            ]
-
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for asset_id, result in zip(batch, results):
-                if isinstance(result, Exception):
-                    log_error(result)
-                    # Record error but don't fail yet - original might succeed
-                    thumbnail_cache[asset_id] = None
-                elif result and result[0] and result[1]:
-                    # Thumbnail downloaded successfully - cache for Phase 2
-                    thumbnail_path, asset_metadata = result
-                    thumbnail_cache[asset_id] = (thumbnail_path, asset_metadata)
-                else:
-                    thumbnail_cache[asset_id] = None
-
-        return thumbnail_cache
-
-    async def _process_original_phase(
-        self,
-        job: ImportJob,
-        asset_ids: list[str],
-        base_url: str,
-        api_key: str,
-        integration: Integration,
-        session: Session,
-        thumbnail_cache: dict
-    ) -> None:
-        """
-        Phase 2: Download originals in parallel batches.
-
-        Creates EntryMedia records ONLY if original download succeeds.
-        Includes thumbnail_path if thumbnail was downloaded in Phase 1.
-        """
-        batch_size = COPY_MODE_BATCH_SIZE
-
-        for i in range(0, len(asset_ids), batch_size):
-            batch = asset_ids[i:i + batch_size]
-            tasks = [
-                self._download_and_save_original(
-                    asset_id=asset_id,
-                    base_url=base_url,
-                    api_key=api_key,
-                    user_id=str(job.user_id),
-                    entry_id=job.entry_id,
-                    integration=integration,
-                    session=session,
-                    thumbnail_info=thumbnail_cache.get(asset_id),
-                    commit=False
-                )
-                for asset_id in batch
-            ]
-
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            processed = 0
-            failed = 0
-            for asset_id, result in zip(batch, results):
-                if isinstance(result, Exception):
-                    log_error(result)
-                    self._mark_media_failed(job.entry_id, asset_id, session, str(result), commit=False)
-                    failed += 1
-                elif result is None:
-                    self._mark_media_failed(job.entry_id, asset_id, session, commit=False)
-                    failed += 1
-                else:
-                    processed += 1
-                    self._maybe_normalize_entry_delta(job.entry_id, session, commit=False)
-
-            # Update job progress after each batch and commit to ensure persistence
-            job.update_progress(job.processed_items + processed, job.total_items, job.failed_items + failed)
-            session.add(job)
-            session.commit()
-
-    async def _download_and_save_thumbnail(
-        self,
-        asset_id: str,
-        base_url: str,
-        api_key: str,
-        user_id: str,
-        entry_id: uuid.UUID,
-        integration: Integration,
-        session: Session
-    ) -> Tuple[Optional[bytes], Optional[dict]]:
-        """
-        Download thumbnail from Immich.
-        Returns thumbnail content and metadata for Phase 2 to save with correct filename.
-        """
-        try:
-            # Fetch asset metadata
-            asset_metadata = await immich.get_asset_info(base_url, api_key, asset_id)
-            if not asset_metadata:
-                return None, None
-
-            # Download thumbnail
-            response = await self._fetch_with_retry(
-                f"{base_url}/api/assets/{asset_id}/thumbnail",
-                headers={"x-api-key": api_key},
-                timeout=30.0
-            )
-
-            if not response or response.status_code != 200:
-                log_warning(f"Failed to download thumbnail for asset {asset_id}")
-                return None, asset_metadata
-
-            thumbnail_content = response.content
-            log_info(f"Downloaded thumbnail for asset {asset_id}")
-            return thumbnail_content, asset_metadata
-
-        except Exception as e:
-            log_error(f"Error in _download_and_save_thumbnail for {asset_id}: {e}")
-            return None, asset_metadata if 'asset_metadata' in locals() else None
-
-    async def _download_and_save_original(
-        self,
-        asset_id: str,
-        base_url: str,
-        api_key: str,
-        user_id: str,
-        entry_id: uuid.UUID,
-        integration: Integration,
-        session: Session,
-        thumbnail_info: Optional[Tuple[Optional[bytes], Optional[dict]]] = None,
-        commit: bool = True
-    ) -> Optional[dict]:
-        """
-        Download original asset from Immich and save to local storage.
-        If thumbnail_info is provided, saves thumbnail with Journiv naming convention.
-        """
-        try:
-            # Get metadata from thumbnail info or fetch it
-            asset_metadata = (thumbnail_info[1] if thumbnail_info else None) or \
-                            await immich.get_asset_info(base_url, api_key, asset_id)
-
-            if not asset_metadata:
-                log_warning(f"Metadata not found for asset {asset_id}")
-                return None
-
-            # Download original
-            metadata = self._extract_immich_metadata(asset_metadata)
-            filename = metadata["original_filename"]
-
-            # Stream download to temp file to avoid OOM on large videos
-            import tempfile
-            import os
-            temp_file_path = None
-
-            try:
-                client = await get_http_client()
-                async with client.stream(
-                    "GET",
-                    f"{base_url}/api/assets/{asset_id}/original",
-                    headers={"x-api-key": api_key},
-                    timeout=120.0,
-                ) as response:
-                        if response.status_code != 200:
-                            log_warning(f"Failed to download original for asset {asset_id}: {response.status_code}")
-                            return None
-
-                        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                            temp_file_path = tmp.name
-
-                        async with aiofiles.open(temp_file_path, 'wb') as f:
-                            async for chunk in response.aiter_bytes():
-                                await f.write(chunk)
-
-                # Save using streaming-support method
-                # Note: Validation happens during save/processing
-                saved_info = await self.media_service.save_uploaded_file(
-                    original_filename=filename,
-                    user_id=user_id,
-                    media_type=metadata["media_type"],
-                    file_path=temp_file_path
-                )
-
-            except Exception as e:
-                log_warning(f"Failed to process original for asset {asset_id}: {e}")
-                return None
-            finally:
-                # Cleanup temp file
-                if temp_file_path and Path(temp_file_path).exists():
-                    try:
-                        os.unlink(temp_file_path)
-                    except Exception as e:
-                        log_warning(f"Failed to remove temp file {temp_file_path}: {e}")
-
-            # Save thumbnail with Journiv naming convention if available
-            if thumbnail_info and thumbnail_info[0]:
-                try:
-                    thumbnail_content = thumbnail_info[0]
-                    media_type = metadata["media_type"]
-
-                    # Get the actual stored filename from saved_info
-                    stored_filename = Path(saved_info["file_path"]).name
-
-                    # Generate thumbnail filename using Journiv's convention
-                    # For images: thumb_{filename} (e.g., thumb_{checksum}.jpg)
-                    # For videos: thumb_{stem}.jpg (e.g., thumb_{checksum}.jpg)
-                    if media_type == MediaType.IMAGE:
-                        thumbnail_filename = f"thumb_{stored_filename}"
-                    elif media_type == MediaType.VIDEO:
-                        # For videos, use stem + .jpg extension
-                        thumbnail_filename = f"thumb_{Path(stored_filename).stem}.jpg"
-                    else:
-                        thumbnail_filename = f"thumb_{stored_filename}"
-
-                    thumbnail_path_obj = self.media_service._get_thumbnail_path(
-                        thumbnail_filename,
-                        media_type,
-                        user_id=user_id
-                    )
-
-                    if thumbnail_path_obj:
-                        thumbnail_path_obj.parent.mkdir(parents=True, exist_ok=True)
-
-                        tmp_thumbnail_path = thumbnail_path_obj.with_suffix(".tmp")
-                        async with aiofiles.open(tmp_thumbnail_path, 'wb') as f:
-                            await f.write(thumbnail_content)
-                            await f.flush()
-
-                        await aiofiles.os.rename(tmp_thumbnail_path, thumbnail_path_obj)
-
-                        thumbnail_path = str(thumbnail_path_obj.relative_to(self.media_service.media_root))
-                        saved_info["thumbnail_path"] = thumbnail_path
-                        log_info(f"Saved thumbnail for asset {asset_id}: {thumbnail_path}")
-                    else:
-                        log_warning(f"Cannot save thumbnail for media type: {media_type}")
-                except Exception as e:
-                    log_warning(f"Failed to save thumbnail for asset {asset_id}: {e}")
-                    # Continue without thumbnail - not critical
-
-            # Upsert record
-            media = self._upsert_entry_media(
-                entry_id=entry_id,
-                user_id=uuid.UUID(user_id),
-                asset_id=asset_id,
-                asset_data=asset_metadata,
-                file_info=saved_info,
-                upload_status=UploadStatus.COMPLETED,
-                session=session,
-                commit=commit
-            )
-
-            # Post-process
-            try:
-                self.media_service.process_uploaded_file(
-                    media_id=str(media.id),
-                    file_path=saved_info["full_file_path"],
-                    user_id=str(user_id)
-                )
-            except Exception as e:
-                log_warning(f"Processing failed for asset {asset_id}: {e}")
-
-            log_info(f"Successfully imported original for asset {asset_id}")
-            return asset_metadata
-
-        except Exception as e:
-            log_error(f"Error in _download_and_save_original for {asset_id}: {e}", exc_info=True)
-            return None
-
     @staticmethod
     def _parse_duration_seconds(raw_duration: Optional[object]) -> Optional[float]:
         """Convert Immich duration values into float seconds."""
@@ -1038,14 +816,12 @@ class ImportJobService:
         """
         Background task to repair missing thumbnails for Immich media.
 
-        Downloads thumbnails from Immich and updates EntryMedia records.
+        Uses Immich SDK (async with client); view_asset_to_file to temp dir, copy to Journiv path, update EntryMedia.
         """
         from app.core.database import engine
 
-        # Create new session for background task
         thread_session = Session(engine)
         try:
-            # Get user and integration
             user = thread_session.get(User, user_id)
             if not user:
                 log_error(f"User {user_id} not found for thumbnail repair")
@@ -1061,38 +837,33 @@ class ImportJobService:
                 log_error(f"Immich integration not active for user {user_id}")
                 return
 
-            # Decrypt API key
             api_key = decrypt_token(integration.access_token_encrypted)
-            base_url = integration.base_url.rstrip('/')
+            base_url = integration.base_url.rstrip("/")
 
             repaired_count = 0
             failed_count = 0
 
-            # Process in batches
-            batch_size = COPY_MODE_BATCH_SIZE
-            for i in range(0, len(asset_ids), batch_size):
-                batch = asset_ids[i:i + batch_size]
-                tasks = [
-                    self._repair_single_thumbnail(
-                        asset_id=asset_id,
-                        base_url=base_url,
-                        api_key=api_key,
-                        user_id=user_id,
-                        session=thread_session
-                    )
-                    for asset_id in batch
-                ]
+            async with immich._create_immich_client(
+                api_key=api_key, base_url=base_url
+            ) as client:
+                for i in range(0, len(asset_ids), COPY_MODE_BATCH_SIZE):
+                    batch = asset_ids[i : i + COPY_MODE_BATCH_SIZE]
+                    tasks = [
+                        self._repair_single_thumbnail(
+                            client, asset_id, user_id, thread_session
+                        )
+                        for asset_id in batch
+                    ]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                for asset_id, result in zip(batch, results):
-                    if isinstance(result, Exception):
-                        log_error(result)
-                        failed_count += 1
-                    elif result:
-                        repaired_count += 1
-                    else:
-                        failed_count += 1
+                    for asset_id, result in zip(batch, results):
+                        if isinstance(result, Exception):
+                            log_error(result)
+                            failed_count += 1
+                        elif result:
+                            repaired_count += 1
+                        else:
+                            failed_count += 1
 
             log_info(
                 f"Thumbnail repair completed for user {user_id}: "
@@ -1106,17 +877,16 @@ class ImportJobService:
 
     async def _repair_single_thumbnail(
         self,
+        client: immich.ImmichAsyncClient,
         asset_id: str,
-        base_url: str,
-        api_key: str,
         user_id: uuid.UUID,
-        session: Session
+        session: Session,
     ) -> bool:
         """
-        Repair thumbnail for a single asset.
+        Repair thumbnail for a single asset using SDK view_asset_to_file; copy to Journiv path and update EntryMedia.
         """
+        temp_dir = Path(tempfile.mkdtemp())
         try:
-            # Find EntryMedia record
             media = session.exec(
                 select(EntryMedia)
                 .join(Entry, Entry.id == EntryMedia.entry_id)
@@ -1129,39 +899,44 @@ class ImportJobService:
                 log_warning(f"EntryMedia not found for asset {asset_id}")
                 return False
 
-            # Get integration (should already be fetched, but ensure we have it)
-            integration = session.exec(
-                select(Integration)
-                .where(Integration.user_id == user_id)
-                .where(Integration.provider == IntegrationProvider.IMMICH)
-            ).first()
-
-            if not integration:
-                log_warning(f"Integration not found for user {user_id}")
-                return False
-
-            # Download thumbnail
-            thumbnail_path, _ = await self._download_and_save_thumbnail(
-                asset_id=asset_id,
-                base_url=base_url,
-                api_key=api_key,
-                user_id=str(user_id),
-                entry_id=media.entry_id,
-                integration=integration,
-                session=session
+            path_thumb = await client.assets.view_asset_to_file(
+                id=uuid.UUID(asset_id),
+                out_dir=temp_dir,
+                size=AssetMediaSize.PREVIEW,
+                show_progress=False,
             )
 
-            if thumbnail_path:
-                # Update EntryMedia record
-                media.thumbnail_path = thumbnail_path
-                session.add(media)
-                session.commit()
-                log_info(f"Repaired thumbnail for asset {asset_id}")
-                return True
-            else:
+            if not path_thumb.exists():
                 log_warning(f"Failed to download thumbnail for asset {asset_id}")
                 return False
+
+            stored_filename = Path(media.file_path or "").name or f"asset-{asset_id}"
+            if media.media_type == MediaType.IMAGE:
+                thumbnail_filename = f"thumb_{stored_filename}"
+            elif media.media_type == MediaType.VIDEO:
+                thumbnail_filename = f"thumb_{Path(stored_filename).stem}.jpg"
+            else:
+                thumbnail_filename = f"thumb_{stored_filename}"
+
+            thumbnail_path_obj = self.media_service._get_thumbnail_path(
+                thumbnail_filename, media.media_type, user_id=str(user_id)
+            )
+            if not thumbnail_path_obj:
+                log_warning(f"Cannot resolve thumbnail path for asset {asset_id}")
+                return False
+
+            thumbnail_path_obj.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path_thumb, thumbnail_path_obj)
+            media.thumbnail_path = str(
+                thumbnail_path_obj.relative_to(self.media_service.media_root)
+            )
+            session.add(media)
+            session.commit()
+            log_info(f"Repaired thumbnail for asset {asset_id}")
+            return True
 
         except Exception as e:
             log_error(e)
             return False
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)

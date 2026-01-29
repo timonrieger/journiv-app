@@ -19,6 +19,7 @@ from enum import Enum
 from typing import Optional, TYPE_CHECKING, Any, Dict
 import json
 
+from immich.client.generated import AssetTypeEnum
 from pydantic import HttpUrl
 from sqlalchemy import Column, ForeignKey, Text, String, UniqueConstraint
 from sqlmodel import Field, Relationship, Index
@@ -52,6 +53,17 @@ class AssetType(str, Enum):
     VIDEO = "VIDEO"
     AUDIO = "AUDIO"
     OTHER = "OTHER"
+
+    @classmethod
+    def from_provider(cls, value: str, provider: IntegrationProvider) -> "AssetType":
+        """Map provider-specific asset type to common AssetType enum."""
+        if provider == IntegrationProvider.IMMICH:
+            type_map = {
+                AssetTypeEnum.IMAGE: AssetType.IMAGE,
+                AssetTypeEnum.VIDEO: AssetType.VIDEO,
+            }
+            return type_map.get(value, AssetType.OTHER)
+        return AssetType.OTHER
 
 
 class ImportMode(str, Enum):

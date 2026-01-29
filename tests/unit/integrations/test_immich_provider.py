@@ -2,7 +2,7 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 
-from app.integrations import immich
+from app.integrations import immich_ as immich
 from app.integrations.immich import IMMICH_API_SEARCH_METADATA
 from app.models.integration import Integration, IntegrationProvider, AssetType
 from app.models.user import User

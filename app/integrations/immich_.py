@@ -1,0 +1,568 @@
+"""
+Immich integration provider.
+
+This module implements the Immich-specific logic for connecting, listing assets,
+and syncing photo/video metadata.
+
+API Documentation: https://api.immich.app/introduction
+"""
+
+from datetime import timezone
+import time
+import uuid
+from urllib.parse import urlencode
+from inspect import isawaitable
+from typing import Dict, Any, List, Optional, Union
+
+import aiohttp
+from immich import AsyncClient as ImmichAsyncClient
+from immich.client.generated.exceptions import (
+    ApiException,
+    ConflictException,
+    ForbiddenException,
+    UnauthorizedException,
+    UnprocessableEntityException,
+    NotFoundException,
+)
+from immich.client.generated import (
+    AssetOrder,
+    AssetResponseDto,
+    BulkIdsDto,
+    CreateAlbumDto,
+    MetadataSearchDto,
+)
+from sqlmodel import Session
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.core.config import settings
+from app.core.media_signing import build_signed_query
+from app.core.encryption import decrypt_token
+from app.core.time_utils import utc_now
+from app.core.logging_config import log_info, log_error, log_warning
+from app.core.scoped_cache import ScopedCache
+from app.models.integration import Integration, IntegrationProvider, AssetType
+from app.integrations.schemas import IntegrationAssetResponse
+from app.models.user import User
+
+
+def _create_immich_client(
+    integration: Optional[Integration] = None,
+    *,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> ImmichAsyncClient:
+    """Create an Immich AsyncClient with an inline aiohttp session (client owns it).
+
+    Either pass an Integration (api key and base URL are read from it), or pass
+    api_key and base_url explicitly (e.g. for connect or ensure_album_exists).
+    """
+    if integration is not None:
+        api_key = decrypt_token(integration.access_token_encrypted)
+        base_url_sdk = _normalize_immich_base_url(integration.base_url)
+    else:
+        if api_key is None or base_url is None:
+            raise ValueError(
+                "Either integration or both api_key and base_url must be provided"
+            )
+        base_url_sdk = _normalize_immich_base_url(base_url)
+    session = aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(
+            limit=20,
+            limit_per_host=20,
+            ssl=True,
+        ),
+        timeout=aiohttp.ClientTimeout(
+            connect=5,
+            sock_read=60,
+        ),
+    )
+    return ImmichAsyncClient(
+        api_key=api_key,
+        base_url=base_url_sdk,
+        http_client=session,
+    )
+
+
+def _normalize_immich_base_url(base_url: str) -> str:
+    """Return base URL including /api for Immich SDK."""
+    base = base_url.strip().rstrip("/")
+    if not base.endswith("/api"):
+        base = f"{base}/api"
+    return base
+
+
+# Asset API paths (aligned with immich-py / Immich API). Used for proxy GET + headers (x-api-key, Range).
+IMMICH_API_ASSET_THUMBNAIL = "/assets/{id}/thumbnail"
+IMMICH_API_ASSET_VIDEO_PLAYBACK = "/assets/{id}/video/playback"
+
+
+async def connect(session: Session | AsyncSession, user: User, base_url: str, credentials: Dict[str, Any]) -> str:
+    """
+    Connect to Immich and validate the user's API key.
+
+    Steps:
+        1. Extract api_key from credentials
+        2. Call Immich SDK get_my_user (GET /api/users/me)
+        3. Validate response and extract user ID
+        4. Return external_user_id for storage
+    """
+    api_key = credentials.get("api_key")
+    if not api_key:
+        raise ValueError("Missing required credential: api_key")
+
+    if not base_url.startswith(("http://", "https://")):
+        raise ValueError("Base URL must start with http:// or https://")
+
+    try:
+        async with _create_immich_client(api_key=api_key, base_url=base_url) as client:
+            user_dto = await client.users.get_my_user()
+        external_user_id = user_dto.id
+        if not external_user_id:
+            raise ValueError("Immich API response missing 'id' field")
+
+        log_info(
+            f"Successfully connected to Immich for user {user.id}, "
+            f"external_user_id: {external_user_id}"
+        )
+        return str(external_user_id)
+
+    except (UnauthorizedException, ForbiddenException) as e:
+        log_warning(e, f"Invalid Immich API key for user {user.id}: {e}")
+        raise ValueError("Invalid Immich API key. Please check your key and try again.")
+
+    except ApiException as e:
+        log_error(e, message=f"Failed to connect to Immich at {base_url}: {e}")
+        raise ValueError(
+            f"Could not connect to Immich server at {base_url}. Please check the URL."
+        )
+
+
+async def list_assets(
+    session: Session | AsyncSession,
+    user: User,
+    integration: Integration,
+    page: int = 1,
+    limit: int = 50,
+    force_refresh: bool = False,
+) -> list[IntegrationAssetResponse]:
+    """
+    List Immich assets (photos/videos) for the user.
+
+    Strategy:
+        - If force_refresh=True: fetch live from Immich
+        - Otherwise: return cached data from ImmichAsset table
+        - If cache is empty: fetch live and populate cache
+    """
+    if not integration.is_active:
+        raise ValueError(f"Integration {integration.id} is not active")
+
+    # If not forcing refresh, try cache first
+    if not force_refresh:
+        cache = _get_cache()
+        cached_data = cache.get(scope_id=str(user.id), cache_type="assets")
+        if cached_data:
+            assets_data = cached_data.get("items", [])
+            start = (page - 1) * limit
+            end = start + limit
+            if len(assets_data) >= end:
+                log_info(
+                    f"Returning cached Immich assets for user {user.id} (page {page}, limit {limit})"
+                )
+                return [
+                    _normalize_immich_asset(
+                        AssetResponseDto.model_validate(asset),
+                        integration.provider,
+                        str(user.id),
+                    )
+                    for asset in assets_data[start:end]
+                ]
+
+    # Fetch live from Immich using SDK search_assets
+    log_info(
+        f"Fetching live Immich assets for user {user.id} (page {page}, limit {limit})"
+    )
+
+    try:
+        async with _create_immich_client(integration=integration) as client:
+            metadata_search_dto = MetadataSearchDto(
+                page=page,
+                size=limit,
+                order=AssetOrder.DESC,
+            )
+            search_result = await client.search.search_assets(metadata_search_dto)
+
+        assets_result = search_result.assets
+        count = assets_result.count
+        total = assets_result.total
+        items = assets_result.items
+
+        log_info(f"Immich search returned {count} assets (total: {total})")
+
+        normalized_assets = [
+            _normalize_immich_asset(item, integration.provider, str(user.id))
+            for item in items
+        ]
+
+        if items:
+            assets_data = [item.model_dump(by_alias=True) for item in items]
+            _save_to_cache(str(user.id), assets_data)
+
+        log_info(
+            f"Fetched {len(normalized_assets)} live Immich assets for user {user.id}"
+        )
+        return normalized_assets
+
+    except (UnauthorizedException, ForbiddenException) as e:
+        log_warning(e, f"Invalid Immich API key for user {user.id}: {e}")
+        raise ValueError("Immich API key is no longer valid. Please reconnect.")
+
+    except ApiException as e:
+        log_error(e, message=f"Immich API error for user {user.id}: {e}")
+        raise
+
+    except (aiohttp.ClientError, TimeoutError, OSError) as e:
+        log_error(e, message=f"Failed to fetch Immich assets for user {user.id}: {e}")
+        raise
+
+
+async def sync(
+    session: Session | AsyncSession,
+    user: User,
+    integration: Integration,
+) -> None:
+    """
+    Background sync task to cache Immich asset metadata.
+
+    This function runs periodically (e.g., every 6 hours) to keep the local
+    cache up to date with the user's Immich library.
+
+    Strategy:
+        1. Fetch recent assets from Immich (up to INTEGRATION_CACHE_LIMIT)
+        2. Store in ScopedCache
+        3. Prune old entries from ScopedCache according to INTEGRATION_CACHE_LIMIT
+        4. Update integration.last_synced_at on success
+        5. Update integration.last_error on failure
+    """
+    if not integration.is_active:
+        log_info(f"Skipping sync for inactive integration {integration.id}")
+        return
+
+    log_info(f"Starting Immich sync for user {user.id}, integration {integration.id}")
+
+    try:
+        cache_limit = settings.integration_cache_limit
+        async with _create_immich_client(integration=integration) as client:
+            metadata_search_dto = MetadataSearchDto(
+                page=1,
+                size=cache_limit,
+                order=AssetOrder.DESC,
+            )
+            search_result = await client.search.search_assets(metadata_search_dto)
+
+        assets_data = [
+            item.model_dump(by_alias=True) for item in search_result.assets.items
+        ]
+        log_info(f"Fetched {len(assets_data)} assets from Immich for sync")
+
+        # Save to cache
+        if assets_data:
+            _save_to_cache(str(user.id), assets_data)
+
+        # Update sync timestamp
+        integration.last_synced_at = utc_now()
+        integration.last_error = None
+        integration.last_error_at = None
+        session.add(integration)
+        await _commit_session(session)
+
+        log_info(
+            f"Successfully synced Immich for user {user.id}, cached {len(assets_data)} assets"
+        )
+
+    except Exception as e:
+        log_error(e, message=f"Failed to sync Immich for user {user.id}: {e}")
+        # Update error tracking
+        integration.last_error = str(e)[:500]  # Truncate to avoid DB errors
+        integration.last_error_at = utc_now()
+        session.add(integration)
+        await _commit_session(session)
+        raise
+
+
+async def ensure_album_exists(
+    base_url: str, api_key: str, album_name: str = "Journiv"
+) -> Optional[str]:
+    """
+    Ensure an album with the given name exists.
+    Uses a single Immich client context: list albums, create if missing, or retry list on conflict.
+
+    Returns:
+        str: The album ID, or None if creation failed.
+    """
+    description = "Photos and Videos linked to Journiv journal entries"
+
+    try:
+        async with _create_immich_client(api_key=api_key, base_url=base_url) as client:
+            all_albums = await client.albums.get_all_albums()
+            for album in all_albums:
+                if album.album_name == album_name:
+                    log_info(f"Found existing Immich album '{album_name}': {album.id}")
+                    return str(album.id)
+
+            log_info(f"Creating Immich album '{album_name}'")
+            try:
+                new_album = await client.albums.create_album(
+                    create_album_dto=CreateAlbumDto(
+                        albumName=album_name,
+                        description=description,
+                    ),
+                )
+                log_info(f"Created Immich album '{album_name}': {new_album.id}")
+                return str(new_album.id)
+            except (ConflictException, UnprocessableEntityException) as e:
+                # Concurrency: album may have been created; find it again
+                all_albums = await client.albums.get_all_albums()
+                for album in all_albums:
+                    if album.album_name == album_name:
+                        return str(album.id)
+                log_error(
+                    e, message=f"Failed to create Immich album '{album_name}': {e}"
+                )
+                return None
+    except Exception as e:
+        log_warning(e, f"Failed to ensure Immich album '{album_name}': {e}")
+        return None
+
+
+async def add_assets_to_album(
+    base_url: str, api_key: str, album_id: str, asset_ids: List[str]
+) -> None:
+    """Add assets to an album using the Immich SDK client."""
+    if not asset_ids:
+        return
+
+    try:
+        bulk_ids_dto = BulkIdsDto(ids=[uuid.UUID(aid) for aid in asset_ids])
+        async with _create_immich_client(api_key=api_key, base_url=base_url) as client:
+            await client.albums.add_assets_to_album(
+                id=uuid.UUID(album_id),
+                bulk_ids_dto=bulk_ids_dto,
+            )
+        log_info(f"Added {len(asset_ids)} assets to Immich album {album_id}")
+    except Exception as e:
+        log_error(e, message=f"Failed to add assets to Immich album {album_id}: {e}")
+        raise
+
+
+async def remove_assets_from_album(
+    base_url: str, api_key: str, album_id: str, asset_ids: List[str]
+) -> None:
+    """Remove assets from an album using the Immich SDK client."""
+    if not asset_ids:
+        return
+
+    try:
+        bulk_ids_dto = BulkIdsDto(ids=[uuid.UUID(aid) for aid in asset_ids])
+        async with _create_immich_client(api_key=api_key, base_url=base_url) as client:
+            await client.albums.remove_asset_from_album(
+                id=uuid.UUID(album_id),
+                bulk_ids_dto=bulk_ids_dto,
+            )
+        log_info(f"Removed {len(asset_ids)} assets from Immich album {album_id}")
+    except Exception as e:
+        log_error(
+            e, message=f"Failed to remove assets from Immich album {album_id}: {e}"
+        )
+        raise
+
+
+async def _commit_session(session: Session | AsyncSession) -> None:
+    result = session.commit()
+    if isawaitable(result):
+        await result
+
+
+# Cache instance
+_cache: Optional[ScopedCache] = None
+
+
+def _get_cache() -> ScopedCache:
+    """Get or create the cache instance."""
+    global _cache
+    if _cache is None:
+        _cache = ScopedCache(namespace="integrations:immich")
+    return _cache
+
+
+def _save_to_cache(user_id: str, assets_data: List[Dict[str, Any]]) -> None:
+    """
+    Save assets to ScopedCache.
+    """
+    try:
+        cache = _get_cache()
+        # Ensure we only cache up to the limit
+        limit = settings.integration_cache_limit
+        cache_data = {"items": assets_data[:limit]}
+
+        cache.set(
+            scope_id=user_id,
+            cache_type="assets",
+            value=cache_data,
+            ttl_seconds=settings.integration_sync_interval_hours
+            * 3600
+            * 2,  # TTL = 2 sync cycles
+        )
+    except Exception as e:
+        log_warning(e, f"Failed to save Immich assets to cache for user {user_id}: {e}")
+
+
+def _normalize_immich_asset(
+    asset: AssetResponseDto,
+    provider: IntegrationProvider,
+    user_id: str,
+) -> IntegrationAssetResponse:
+    """
+    Convert Immich AssetResponseDto to normalized IntegrationAssetResponse.
+    """
+
+    # Title: prefer original_file_name, fall back to original_path, then ID
+    title = asset.original_file_name or asset.original_path or f"Asset {asset.id[:8]}"
+
+    # taken_at: prefer local_date_time, then exif_info.date_time_original, fall back to created_at
+    taken_at_dt = (
+        asset.local_date_time
+        or (asset.exif_info.date_time_original if asset.exif_info else None)
+        or asset.created_at
+    )
+    taken_at = None
+    if taken_at_dt is not None:
+        try:
+            if taken_at_dt.tzinfo is None:
+                taken_at = taken_at_dt.replace(tzinfo=timezone.utc)
+            else:
+                taken_at = taken_at_dt.astimezone(timezone.utc)
+        except (ValueError, AttributeError) as e:
+            log_warning(
+                e, f"Failed to normalize taken_at for asset {asset.id}: {taken_at_dt}"
+            )
+
+    thumb_url = _build_signed_proxy_url(
+        provider=provider,
+        asset_id=asset.id,
+        user_id=user_id,
+        variant="thumbnail",
+        ttl_seconds=settings.media_thumbnail_signed_url_ttl_seconds,
+    )
+    # Use video-specific TTL if asset is a video
+    original_ttl = (
+        settings.media_signed_url_video_ttl_seconds
+        if asset.type == AssetType.VIDEO
+        else settings.media_signed_url_ttl_seconds
+    )
+
+    original_url = _build_signed_proxy_url(
+        provider=provider,
+        asset_id=asset.id,
+        user_id=user_id,
+        variant="original",
+        ttl_seconds=original_ttl,
+    )
+
+    return IntegrationAssetResponse(
+        id=asset.id,
+        type=AssetType.from_provider(asset.type, provider),
+        title=title,
+        taken_at=taken_at,
+        thumb_url=thumb_url,
+        original_url=original_url,
+    )
+
+
+async def get_asset_info(base_url: str, api_key: str, asset_id: str) -> Dict[str, Any]:
+    """
+    Fetch details for a single asset from Immich.
+    Falls back to search endpoint if direct lookup fails (e.g. 404).
+    """
+    asset_uuid = uuid.UUID(asset_id)
+
+    try:
+        async with _create_immich_client(api_key=api_key, base_url=base_url) as client:
+            try:
+                asset = await client.assets.get_asset_info(id=asset_uuid)
+                return asset.model_dump(by_alias=True)
+            except NotFoundException:
+                search_result = await client.search.search_assets(
+                    MetadataSearchDto(id=asset_uuid),
+                )
+                items = search_result.assets.items
+                if items:
+                    return items[0].model_dump(by_alias=True)
+                return {}
+    except Exception as e:
+        log_warning(e, f"Failed to fetch Immich asset info for {asset_id}")
+
+    return {}
+
+
+def get_asset_url(
+    base_url: str,
+    asset_id: str,
+    variant: str,
+    asset_type: AssetType = AssetType.IMAGE,
+) -> str:
+    """
+    Build the Immich API URL for a given asset and variant.
+
+    Caller sends GET with x-api-key and optional Range header (for original/video).
+    Aligned with immich-py: URL-only, no SDK; request/header handling is done by the proxy.
+    """
+    base = _normalize_immich_base_url(base_url)
+    if variant == "thumbnail":
+        path = IMMICH_API_ASSET_THUMBNAIL.format(id=asset_id)
+        return f"{base}{path}"
+    if variant == "original":
+        if asset_type == AssetType.VIDEO:
+            path = IMMICH_API_ASSET_VIDEO_PLAYBACK.format(id=asset_id)
+            return f"{base}{path}"
+        path = f"{IMMICH_API_ASSET_THUMBNAIL.format(id=asset_id)}?size=preview"
+        return f"{base}{path}"
+    raise ValueError(f"Unknown variant {variant}")
+
+
+def get_cached_asset_type(user_id: str, asset_id: str) -> Optional[AssetType]:
+    """
+    Try to find asset type in local integration cache.
+    """
+    try:
+        cache = _get_cache()
+        cached_data = cache.get(scope_id=user_id, cache_type="assets")
+        if cached_data and "items" in cached_data:
+            for item in cached_data["items"]:
+                if item.get("id") == asset_id:
+                    return AssetType.from_provider(
+                        item.get("type", "OTHER"), IntegrationProvider.IMMICH
+                    )
+    except Exception:
+        pass
+    return None
+
+
+def _build_signed_proxy_url(
+    provider: Union[IntegrationProvider, str],
+    asset_id: str,
+    user_id: str,
+    variant: str,
+    ttl_seconds: int,
+) -> str:
+    # Handle both enum and string types for provider
+    provider_value = (
+        provider.value if isinstance(provider, IntegrationProvider) else provider
+    )
+    expires_at = int(time.time()) + ttl_seconds
+    query = build_signed_query(
+        provider_value, variant, asset_id, str(user_id), expires_at
+    )
+    return (
+        f"/api/v1/integrations/{provider_value}/proxy/{asset_id}/{variant}"
+        f"?{urlencode(query)}"
+    )

@@ -35,7 +35,6 @@ from app.core.http_client import close_http_client
 from app.core.rate_limiting import limiter, rate_limit_exceeded_handler
 from app.middleware.request_logging import request_id_ctx, RequestLoggingMiddleware
 from app.middleware.csp_middleware import create_csp_middleware
-from app.models.integration import Integration
 
 # -----------------------------------------------------------------------------
 # Startup / Shutdown
