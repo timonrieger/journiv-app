@@ -62,4 +62,4 @@ rich==14.3.1
 ijson==3.4.0.post0
 
 # Integrations
-immich==1.7.2
+immich==1.6.3
