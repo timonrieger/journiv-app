@@ -318,15 +318,16 @@ def log_warning(
         message_or_error: Exception object or warning message string
         message: Optional override for the log message
         request_id: Optional request ID for context
-        **kwargs: Additional context (e.g., media_id, user_id)
+        **kwargs: Additional context (e.g., media_id, user_id, exc_info=True)
     """
     logger = logging.getLogger(LogCategory.APP)
+    exc_info = kwargs.pop("exc_info", None)
     if isinstance(message_or_error, Exception):
         log_message = message or str(message_or_error)
-        exc_info = True
+        exc_info = exc_info if exc_info is not None else True
     else:
         log_message = message or message_or_error
-        exc_info = False
+        exc_info = exc_info if exc_info is not None else False
     _log_with_context(logger, logging.WARNING, log_message, request_id, exc_info=exc_info, **kwargs)
 
 
@@ -345,9 +346,11 @@ def log_error(
         message: Optional override for the log message (keyword-only)
         request_id: Optional request ID for context
         user_email: Optional user email for context
-        **kwargs: Additional context (e.g., media_id, user_id)
+        **kwargs: Additional context (e.g., media_id, user_id, exc_info=True)
     """
     logger = logging.getLogger(LogCategory.ERRORS)
+    exc_info = kwargs.pop("exc_info", None)
+    exc_info = exc_info if exc_info is not None else isinstance(error, Exception)
     user_info = f" (user: {user_email})" if user_email else ""
     if message:
         log_message = f"{message}: {str(error)}{user_info}"

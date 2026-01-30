@@ -45,7 +45,6 @@ from app.models.integration import Integration, IntegrationProvider, AssetType
 from app.integrations.schemas import IntegrationAssetResponse
 from app.models.user import User
 
-
 def _get_client(
     integration: Optional[Integration] = None,
     *,
@@ -66,21 +65,9 @@ def _get_client(
                 "Either integration or both api_key and base_url must be provided"
             )
         base_url_sdk = _normalize_immich_base_url(base_url)
-    session = aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(
-            limit=20,
-            limit_per_host=20,
-            ssl=True,
-        ),
-        timeout=aiohttp.ClientTimeout(
-            connect=5,
-            sock_read=60,
-        ),
-    )
     return ImmichAsyncClient(
         api_key=api_key,
         base_url=base_url_sdk,
-        http_client=session,
     )
 
 
