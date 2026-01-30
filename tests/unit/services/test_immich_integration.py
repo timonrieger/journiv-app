@@ -1,14 +1,15 @@
+import uuid
 import pytest
-from unittest.mock import MagicMock, patch
-from uuid import uuid4
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-from app.services.export_service import ExportService
-from app.services.import_service import ImportService
 from app.models.entry import EntryMedia
 from app.models.enums import MediaType, UploadStatus
 from app.schemas.dto import MediaDTO
+from app.services.export_service import ExportService
+from app.services.import_service import ImportService
+
 
 def test_export_includes_external_fields():
     """Verify that export service populates external fields in MediaDTO."""
@@ -20,8 +21,8 @@ def test_export_includes_external_fields():
 
         # Create media with external fields
         media = MagicMock(spec=EntryMedia)
-        media.id = uuid4()
-        media.entry_id = uuid4()
+        media.id = uuid.uuid4()
+        media.entry_id = uuid.uuid4()
         media.file_path = None
         media.original_filename = "photo.jpg"
         media.media_type = MediaType.IMAGE
@@ -74,8 +75,8 @@ def test_import_handles_external_media_link_only():
         external_metadata={"foo": "bar"}
     )
 
-    entry_id = uuid4()
-    user_id = uuid4()
+    entry_id = uuid.uuid4()
+    user_id = uuid.uuid4()
 
     # Simulate no existing media found (for deduplication check)
     db.query.return_value.filter.return_value.first.return_value = None
@@ -83,7 +84,7 @@ def test_import_handles_external_media_link_only():
     # Mock _create_media_record to return a media object
     with patch.object(service, '_create_media_record') as mock_create:
         mock_media = MagicMock(spec=EntryMedia)
-        mock_media.id = uuid4()
+        mock_media.id = uuid.uuid4()
         mock_create.return_value = mock_media
         result = service._import_media(
             entry_id=entry_id,
@@ -123,7 +124,7 @@ def test_create_media_record_populates_external_fields():
     )
 
     media = service._create_media_record(
-        entry_id=uuid4(),
+        entry_id=uuid.uuid4(),
         file_path=None,
         media_dto=media_dto,
         checksum="hash123",
@@ -155,8 +156,8 @@ def test_import_handles_external_media_with_no_media_dir():
         external_metadata={"foo": "bar"}
     )
 
-    entry_id = uuid4()
-    user_id = uuid4()
+    entry_id = uuid.uuid4()
+    user_id = uuid.uuid4()
 
     # Simulate no existing media found (for deduplication check)
     db.query.return_value.filter.return_value.first.return_value = None
@@ -164,7 +165,7 @@ def test_import_handles_external_media_with_no_media_dir():
     # Mock _create_media_record to return a media object
     with patch.object(service, '_create_media_record') as mock_create:
         mock_media = MagicMock(spec=EntryMedia)
-        mock_media.id = uuid4()
+        mock_media.id = uuid.uuid4()
         mock_create.return_value = mock_media
 
         # Pass media_dir=None explicitly
@@ -204,8 +205,8 @@ def test_import_allows_duplicate_external_media():
         external_url="https://immich.example.com/assets/asset-123"
     )
 
-    entry_id = uuid4()
-    user_id = uuid4()
+    entry_id = uuid.uuid4()
+    user_id = uuid.uuid4()
 
     # Simulate existing media usually would be found if we queried, but we don't query.
     # We can mock the query to ensure it's NOT CALLED or just verify creation happens.
@@ -213,7 +214,7 @@ def test_import_allows_duplicate_external_media():
     # Mock _create_media_record - SHOULD be called now
     with patch.object(service, '_create_media_record') as mock_create:
         mock_media = MagicMock(spec=EntryMedia)
-        mock_media.id = uuid4()
+        mock_media.id = uuid.uuid4()
         mock_create.return_value = mock_media
 
         result = service._import_media(

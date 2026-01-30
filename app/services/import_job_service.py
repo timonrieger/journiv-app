@@ -502,7 +502,7 @@ class ImportJobService:
             base_url = integration.base_url.rstrip("/")
             asset_ids = job.result_data.get("asset_ids", [])
 
-            async with immich._create_immich_client(
+            async with immich._get_client(
                 api_key=api_key, base_url=base_url
             ) as client:
                 for i in range(0, len(asset_ids), COPY_MODE_BATCH_SIZE):
@@ -843,7 +843,7 @@ class ImportJobService:
             repaired_count = 0
             failed_count = 0
 
-            async with immich._create_immich_client(
+            async with immich._get_client(
                 api_key=api_key, base_url=base_url
             ) as client:
                 for i in range(0, len(asset_ids), COPY_MODE_BATCH_SIZE):

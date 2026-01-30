@@ -27,6 +27,7 @@ from immich.client.generated.exceptions import (
 from immich.client.generated import (
     AssetOrder,
     AssetResponseDto,
+    AssetTypeEnum,
     BulkIdsDto,
     CreateAlbumDto,
     MetadataSearchDto,
@@ -45,7 +46,7 @@ from app.integrations.schemas import IntegrationAssetResponse
 from app.models.user import User
 
 
-def _create_immich_client(
+def _get_client(
     integration: Optional[Integration] = None,
     *,
     api_key: Optional[str] = None,
@@ -85,6 +86,9 @@ def _create_immich_client(
 
 def _normalize_immich_base_url(base_url: str) -> str:
     """Return base URL including /api for Immich SDK."""
+    if not base_url.startswith(("http://", "https://")):
+        raise ValueError("Base URL must start with http:// or https://")
+
     base = base_url.strip().rstrip("/")
     if not base.endswith("/api"):
         base = f"{base}/api"
@@ -110,11 +114,8 @@ async def connect(session: Session | AsyncSession, user: User, base_url: str, cr
     if not api_key:
         raise ValueError("Missing required credential: api_key")
 
-    if not base_url.startswith(("http://", "https://")):
-        raise ValueError("Base URL must start with http:// or https://")
-
     try:
-        async with _create_immich_client(api_key=api_key, base_url=base_url) as client:
+        async with _get_client(api_key=api_key, base_url=base_url) as client:
             user_dto = await client.users.get_my_user()
         external_user_id = user_dto.id
         if not external_user_id:
@@ -183,7 +184,7 @@ async def list_assets(
     )
 
     try:
-        async with _create_immich_client(integration=integration) as client:
+        async with _get_client(integration=integration) as client:
             metadata_search_dto = MetadataSearchDto(
                 page=page,
                 size=limit,
@@ -251,7 +252,7 @@ async def sync(
 
     try:
         cache_limit = settings.integration_cache_limit
-        async with _create_immich_client(integration=integration) as client:
+        async with _get_client(integration=integration) as client:
             metadata_search_dto = MetadataSearchDto(
                 page=1,
                 size=cache_limit,
@@ -302,7 +303,7 @@ async def ensure_album_exists(
     description = "Photos and Videos linked to Journiv journal entries"
 
     try:
-        async with _create_immich_client(api_key=api_key, base_url=base_url) as client:
+        async with _get_client(api_key=api_key, base_url=base_url) as client:
             all_albums = await client.albums.get_all_albums()
             for album in all_albums:
                 if album.album_name == album_name:
@@ -343,7 +344,7 @@ async def add_assets_to_album(
 
     try:
         bulk_ids_dto = BulkIdsDto(ids=[uuid.UUID(aid) for aid in asset_ids])
-        async with _create_immich_client(api_key=api_key, base_url=base_url) as client:
+        async with _get_client(api_key=api_key, base_url=base_url) as client:
             await client.albums.add_assets_to_album(
                 id=uuid.UUID(album_id),
                 bulk_ids_dto=bulk_ids_dto,
@@ -363,7 +364,7 @@ async def remove_assets_from_album(
 
     try:
         bulk_ids_dto = BulkIdsDto(ids=[uuid.UUID(aid) for aid in asset_ids])
-        async with _create_immich_client(api_key=api_key, base_url=base_url) as client:
+        async with _get_client(api_key=api_key, base_url=base_url) as client:
             await client.albums.remove_asset_from_album(
                 id=uuid.UUID(album_id),
                 bulk_ids_dto=bulk_ids_dto,
@@ -454,12 +455,11 @@ def _normalize_immich_asset(
         ttl_seconds=settings.media_thumbnail_signed_url_ttl_seconds,
     )
     # Use video-specific TTL if asset is a video
-    is_video = AssetType.from_provider(asset.type, provider) == AssetType.VIDEO
-    original_ttl = (
-        settings.media_signed_url_video_ttl_seconds
-        if is_video
-        else settings.media_signed_url_ttl_seconds
-    )
+    asset_type = AssetType.from_provider(asset.type, provider)
+    if asset_type == AssetType.VIDEO:
+        original_ttl = settings.media_signed_url_video_ttl_seconds
+    else:
+        original_ttl = settings.media_signed_url_ttl_seconds
 
     original_url = _build_signed_proxy_url(
         provider=provider,
@@ -471,7 +471,7 @@ def _normalize_immich_asset(
 
     return IntegrationAssetResponse(
         id=asset.id,
-        type=AssetType.from_provider(asset.type, provider),
+        type=asset_type,
         title=title,
         taken_at=taken_at,
         thumb_url=thumb_url,
@@ -487,7 +487,7 @@ async def get_asset_info(base_url: str, api_key: str, asset_id: str) -> Dict[str
     asset_uuid = uuid.UUID(asset_id)
 
     try:
-        async with _create_immich_client(api_key=api_key, base_url=base_url) as client:
+        async with _get_client(api_key=api_key, base_url=base_url) as client:
             try:
                 asset = await client.assets.get_asset_info(id=asset_uuid)
                 return asset.model_dump(by_alias=True)
@@ -541,7 +541,7 @@ def get_cached_asset_type(user_id: str, asset_id: str) -> Optional[AssetType]:
             for item in cached_data["items"]:
                 if item.get("id") == asset_id:
                     return AssetType.from_provider(
-                        item.get("type", "OTHER"), IntegrationProvider.IMMICH
+                        AssetTypeEnum(item.get("type", AssetTypeEnum.OTHER)), IntegrationProvider.IMMICH
                     )
     except Exception:
         pass
