@@ -454,9 +454,10 @@ def _normalize_immich_asset(
         ttl_seconds=settings.media_thumbnail_signed_url_ttl_seconds,
     )
     # Use video-specific TTL if asset is a video
+    is_video = AssetType.from_provider(asset.type, provider) == AssetType.VIDEO
     original_ttl = (
         settings.media_signed_url_video_ttl_seconds
-        if asset.type == AssetType.VIDEO
+        if is_video
         else settings.media_signed_url_ttl_seconds
     )
 
