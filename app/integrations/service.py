@@ -830,30 +830,35 @@ async def add_assets_to_integration_album(
         log_warning(f"Provider {provider} does not support album addition")
         return
 
-    # Get album_id from metadata
-    metadata = integration.get_metadata()
-    album_id = metadata.get("album_id")
-
+    api_key = decrypt_token(integration.access_token_encrypted)
+    album_id: Optional[str] = None
+    if hasattr(provider_module, "ensure_album_exists"):
+        album_id = await provider_module.ensure_album_exists(
+            integration.base_url, api_key
+        )
+        if album_id:
+            integration.update_metadata(album_id=album_id, album_error=None)
+            session.add(integration)
+            await _commit(session)
+            await _refresh(session, integration)
+    if not album_id:
+        album_id = integration.get_metadata().get("album_id")
     if not album_id:
         log_warning(
-            f"No album_id found for {provider} integration (user {user_id}), skipping album add. "
-            f"Album may not have been created due to permissions."
+            f"No album_id for {provider} (user {user_id}), skipping album add"
         )
         return
 
     try:
-        api_key = decrypt_token(integration.access_token_encrypted)
-
         await provider_module.add_assets_to_album(
             integration.base_url,
             api_key,
             album_id,
-            asset_ids
+            asset_ids,
         )
         log_info(f"Added {len(asset_ids)} assets to {provider} album {album_id}")
     except Exception as e:
         log_error(e, user_id=user_id, message=f"Failed to add assets to {provider} album")
-        # Don't raise, allowing background task to fail gracefully
 
 
 async def remove_assets_from_integration_album(
