@@ -82,7 +82,7 @@ def _normalize_immich_base_url(base_url: str) -> str:
     return base
 
 
-# Asset API paths (aligned with immich-py / Immich API). Used for proxy GET + headers (x-api-key, Range).
+# Used for proxy GET + headers (x-api-key, Range).
 IMMICH_API_ASSET_THUMBNAIL = "/assets/{id}/thumbnail"
 IMMICH_API_ASSET_VIDEO_PLAYBACK = "/assets/{id}/video/playback"
 
@@ -502,7 +502,7 @@ def get_asset_url(
     Build the Immich API URL for a given asset and variant.
 
     Caller sends GET with x-api-key and optional Range header (for original/video).
-    Aligned with immich-py: URL-only, no SDK; request/header handling is done by the proxy.
+    URL-only, no SDK; request/header handling is done by the proxy.
     """
     base = _normalize_immich_base_url(base_url)
     if variant == "thumbnail":
