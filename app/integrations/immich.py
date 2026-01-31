@@ -191,9 +191,8 @@ async def list_assets(
             for item in items
         ]
 
-        if items:
-            assets_data = [item.model_dump(by_alias=True) for item in items]
-            _save_to_cache(str(user.id), assets_data)
+        assets_data = [item.model_dump(by_alias=True) for item in items]
+        _save_to_cache(str(user.id), assets_data)
 
         log_info(
             f"Fetched {len(normalized_assets)} live Immich assets for user {user.id}"
@@ -253,8 +252,7 @@ async def sync(
         log_info(f"Fetched {len(assets_data)} assets from Immich for sync")
 
         # Save to cache
-        if assets_data:
-            _save_to_cache(str(user.id), assets_data)
+        _save_to_cache(str(user.id), assets_data)
 
         # Update sync timestamp
         integration.last_synced_at = utc_now()
