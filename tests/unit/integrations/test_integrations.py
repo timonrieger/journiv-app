@@ -438,7 +438,7 @@ class TestIntegrationOptimizations:
     @pytest.mark.asyncio
     async def test_immich_client_is_shared(self):
         """Test that Immich provider uses a shared httpx client."""
-        from app.integrations import immich_ as immich
+        from app.integrations import immich
 
         # Reset client to ensure clean state
         original_client = immich._client

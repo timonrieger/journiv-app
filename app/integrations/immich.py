@@ -15,8 +15,8 @@ from inspect import isawaitable
 from typing import Dict, Any, List, Optional, Union
 
 import aiohttp
-from immich import AsyncClient as ImmichAsyncClient
-from immich.client.generated.exceptions import (
+from immichpy import AsyncClient as ImmichAsyncClient
+from immichpy.client.generated.exceptions import (
     ApiException,
     ConflictException,
     ForbiddenException,
@@ -24,7 +24,7 @@ from immich.client.generated.exceptions import (
     UnprocessableEntityException,
     NotFoundException,
 )
-from immich.client.generated import (
+from immichpy.client.generated import (
     AssetOrder,
     AssetResponseDto,
     AssetTypeEnum,

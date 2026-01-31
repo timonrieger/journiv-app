@@ -33,7 +33,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.config import settings
 from app.core.encryption import encrypt_token, decrypt_token
 from app.core.time_utils import utc_now
-from app.integrations import immich_ as immich
+from app.integrations import immich
 from app.models.integration import Integration, IntegrationProvider, ImportMode, AssetType
 from app.integrations.schemas import (
     IntegrationStatusResponse,

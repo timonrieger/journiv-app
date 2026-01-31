@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from immich.client.generated.models.asset_media_size import AssetMediaSize
+from immichpy.client.generated.models.asset_media_size import AssetMediaSize
 from sqlmodel import Session, select
 
 from app.core.encryption import decrypt_token
@@ -23,7 +23,7 @@ from app.models.integration import Integration, IntegrationProvider, ImportMode
 from app.schemas.entry import EntryMediaCreate
 from app.services.entry_service import EntryService
 from app.services.media_service import MediaService
-from app.integrations import immich_ as immich
+from app.integrations import immich
 
 from app.core.logging_config import log_info, log_error, log_warning
 from app.core.media_signing import normalize_delta_media_ids

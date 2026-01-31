@@ -2,9 +2,9 @@ import uuid
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from immich.client.generated.exceptions import ConflictException, UnprocessableEntityException
+from immichpy.client.generated.exceptions import ConflictException, UnprocessableEntityException
 
-from app.integrations import immich_ as immich
+from app.integrations import immich
 
 
 def _make_album(id: uuid.UUID, album_name: str) -> MagicMock:

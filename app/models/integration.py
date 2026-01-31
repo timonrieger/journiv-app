@@ -19,7 +19,7 @@ from enum import Enum
 from typing import Optional, TYPE_CHECKING, Any, Dict
 import json
 
-from immich.client.generated import AssetTypeEnum
+from immichpy.client.generated import AssetTypeEnum
 from pydantic import HttpUrl
 from sqlalchemy import Column, ForeignKey, Text, String, UniqueConstraint
 from sqlmodel import Field, Relationship, Index

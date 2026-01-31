@@ -2,10 +2,10 @@ import uuid
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from immich.client.generated import AssetOrder
-from immich.client.generated.exceptions import NotFoundException
+from immichpy.client.generated import AssetOrder
+from immichpy.client.generated.exceptions import NotFoundException
 
-from app.integrations import immich_ as immich_mod
+from app.integrations import immich as immich_mod
 from app.models.integration import Integration, IntegrationProvider, AssetType
 from app.models.user import User
 
