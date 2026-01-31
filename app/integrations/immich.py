@@ -469,9 +469,8 @@ async def get_asset_info(base_url: str, api_key: str, asset_id: str) -> Dict[str
     Fetch details for a single asset from Immich.
     Falls back to search endpoint if direct lookup fails (e.g. 404).
     """
-    asset_uuid = uuid.UUID(asset_id)
-
     try:
+        asset_uuid = uuid.UUID(asset_id)
         async with _get_client(api_key=api_key, base_url=base_url) as client:
             try:
                 asset = await client.assets.get_asset_info(id=asset_uuid)
